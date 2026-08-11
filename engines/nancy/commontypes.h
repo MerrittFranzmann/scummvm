@@ -49,6 +49,8 @@ static const int8 kFlagNoLabel						= -1;
 static const int8 kEvNoEvent						= -1;
 static const int8 kFrNoFrame						= -1;
 static const uint16 kNoScene						= 9999;
+// Nancy16 switched to its own sentinel; readers normalise it to kNoScene
+static const uint16 kNancy16NoScene					= 32767;
 
 // Taskbar popup UI types. Shared by ControlUIItems (AR 29), UIPopupPrepScene
 // (AR 32) and the Scene UI-prep-scene machinery.
@@ -209,9 +211,14 @@ struct FrameBlitDescription {
 
 // Describes 10 event flag changes to be executed when an action is triggered
 struct MultiEventFlagDescription {
-	FlagDescription descs[10];
+	// Fixed at 10 up to Nancy15; Nancy16 made the list count-prefixed, and some
+	// records carry as many as 17, so this has to be resizable
+	MultiEventFlagDescription() { descs.resize(10); }
+
+	Common::Array<FlagDescription> descs;
 
 	void readData(Common::SeekableReadStream &stream);
+	void readDataCounted(Common::SeekableReadStream &stream);	// Nancy16+
 	void execute();
 };
 

@@ -34,6 +34,9 @@ namespace Nancy {
 
 struct EngineData {
 	EngineData(Common::SeekableReadStream *chunkStream);
+	// For data assembled from several chunks rather than one, as in the Nancy16+
+	// font registry
+	EngineData() {}
 	virtual ~EngineData() {}
 };
 
@@ -41,7 +44,7 @@ struct EngineData {
 struct BSUM : public EngineData {
 	BSUM(Common::SeekableReadStream *chunkStream);
 
-	byte header[90];
+	byte header[90] = {};
 
 	Common::Path conversationTextsFilename;
 	Common::Path autotextFilename;
@@ -49,6 +52,15 @@ struct BSUM : public EngineData {
 	// Nancy12+
 	Common::Path fontFilename;
 	Common::Path flagsFilename;
+
+	// Nancy16+
+	Common::Path inventoryFilename;
+	Common::String supportURL;
+
+private:
+	void readNancy16(Common::SeekableReadStream *chunkStream);
+
+public:
 
 	// Game start section
 	SceneChangeDescription firstScene;
@@ -89,6 +101,48 @@ struct BSUM : public EngineData {
 	byte overrideMovementTimeDeltas;
 	uint16 slowMovementTimeDelta;
 	uint16 fastMovementTimeDelta;
+};
+
+// Nancy16 replaced the glyph-atlas font data with a registry that names real
+// Windows typefaces, and ships no glyph data at all - so the engine has to
+// substitute. Each FONT chunk is one alias; each COLR chunk is a 4-state
+// palette entry. There is no count field: the chunks are simply iterated.
+struct FontRegistry : public EngineData {
+	struct Entry {
+		uint32 id = 0;
+		Common::String alias;	// e.g. "UIFont", referenced by NDUI descriptors
+		Common::String face;	// e.g. "Tahoma", a real typeface this cannot ship
+		uint32 height = 0;		// px, LOGFONT lfHeight magnitude
+		uint32 weight = 0;		// LOGFONT lfWeight: 400 normal, 700 bold
+		byte flag = 0;
+	};
+
+	struct ColourEntry {
+		uint32 id = 0;
+		uint32 argb[4] = {};	// NORMAL, DISABLED, MOUSEOVER/FOCUS, PRESSED
+	};
+
+	FontRegistry() {}
+
+	void readFontChunk(Common::SeekableReadStream &stream);
+	void readColourChunk(Common::SeekableReadStream &stream);
+
+	// Nancy16 registers each face twice, at weight and weight + 300, under keys
+	// 2 * id and 2 * id + 1 - so the bold variant is synthesized rather than
+	// stored. Returns nullptr for an unknown alias.
+	const Entry *findByAlias(const Common::String &alias) const;
+
+	// The inline <fN> markup code names a FONT chunk by its own id, so the id has
+	// to be resolvable as well as the alias. Returns nullptr for an unknown id.
+	const Entry *findByID(uint32 id) const;
+
+	// The inline <cN> and <bN> markup codes name a COLR chunk by its id.
+	// nancy18 ships ids 0..8; anything else returns nullptr and the caller is
+	// expected to leave the run's colour alone rather than invent one.
+	const ColourEntry *findColourByID(uint32 id) const;
+
+	Common::Array<Entry> entries;
+	Common::Array<ColourEntry> colours;
 };
 
 // Contains rects defining the in-game viewport
@@ -149,6 +203,33 @@ struct INV : public EngineData {
 	Common::String cantText;
 
 	Common::Array<ItemDescription> itemDescriptions;
+};
+
+// Nancy16's inventory table. The old INV chunk moved out of BOOT and into the
+// INVENTORY member of ciftree.dat as INVD. 2 + 48 * 90 = 4322 bytes, exact.
+//
+//   uint16   itemID          0..47, matching the INV_* event flag ids
+//   char[33] name            "Bank Card", "Binoculars", ...
+//   uint32   flags           bit0 keepItem, bit1 has view scene, bit2 pseudo-item
+//   char[33] viewSceneName   "s6200"-form, set on exactly the bit1 records
+//   int16    -4 in 48/48
+//   RECT     sourceRect      38x38 cell on a 39px stride in UI_INVENTORY
+struct INVD : public EngineData {
+	struct Item {
+		uint16 id = 0;
+		Common::String name;
+		uint32 flags = 0;
+		Common::String viewSceneName;
+		Common::Rect sourceRect;
+
+		bool keepItem() const { return flags & 1; }
+		bool hasViewScene() const { return flags & 2; }
+		bool isPseudoItem() const { return flags & 4; }
+	};
+
+	INVD(Common::SeekableReadStream *chunkStream);
+
+	Common::Array<Item> items;
 };
 
 // Contains data about the textbox at the bottom left of the game screen
@@ -813,6 +894,7 @@ struct EVNT : public EngineData {
 	static const uint kEventRecordSize = 35;
 
 	Common::Array<Common::String> eventFlagNames;
+	Common::Array<uint16> eventFlagIDs;	// Nancy16+: IDs are no longer implied by position
 };
 
 // UI overlay element table. Introduced in Nancy 12. Each record describes one UI
@@ -862,11 +944,28 @@ struct LVLN : public EngineData {
 	Common::Array<Common::String> levelNames;	// e.g. "Kapu Cave"
 };
 
+// Environment table. Introduced in Nancy 16, replacing LVLN and MMIX: it maps a
+// scene-prefix code to its display name, its ambient sound, and its music
+// playlist, all in a single chunk.
+struct ENVS : public EngineData {
+	struct Environment {
+		Common::String sceneCode;					// e.g. "ALT"
+		Common::String displayName;					// e.g. "Altana"
+		Common::String ambientSoundName;			// e.g. "ALT_Amb_sfx"; empty for UI screens
+		Common::Array<Common::String> musicNames;	// 1-5 entries
+	};
+
+	ENVS(Common::SeekableReadStream *chunkStream);
+
+	Common::Array<Environment> environments;
+};
+
 // Player-character selector UI. Introduced in Nancy 15, where the player
 // alternates between Nancy and the Hardy Boys.
 // Each entry supplies the image names for one selectable character.
 struct PCUI : public EngineData {
 	struct Character {
+		Common::String name;				// Nancy16+ only, e.g. "Nancy"
 		Common::String imageName;			// e.g. "PUI_CRE_Nancy"
 		Common::String defaultImageName;	// e.g. "PUI_CRE_Nancy_Default"
 		uint16 id = 0;
@@ -875,7 +974,9 @@ struct PCUI : public EngineData {
 	PCUI(Common::SeekableReadStream *chunkStream);
 
 	byte flag = 0;
-	Common::Array<Character> characters;	// indexed by the on-disk slot byte
+	Common::String defaultCharacterName;	// Nancy16+ only, e.g. "Tutor"
+	Common::String mainUIName;				// Nancy16+ only, e.g. "UI_Main"
+	Common::Array<Character> characters;	// Up to Nancy15, indexed by the on-disk slot byte
 };
 
 // Fixed layout/graphics block for the Nancy 15 player-character ("Design
@@ -897,6 +998,11 @@ struct PUIH : public EngineData {
 	byte flag = 0;
 	Common::String themeName;	// e.g. "Nancy Classic Look (Default)"
 	Common::String swatchImageName;	// e.g. "UI_Swatch_ND"
+
+	// Nancy16+
+	Common::String onBecomeDefault;	// callback name, e.g. "OnBecomeDefault"
+	Common::String onLeaveDefault;	// callback name, e.g. "OnLeaveDefault"
+	Common::String textTableName;	// the tree's own CVTX member, e.g. "UI_Text"
 };
 
 // Player-UI random-sound bank. Introduced in Nancy 15 (per-character boot).

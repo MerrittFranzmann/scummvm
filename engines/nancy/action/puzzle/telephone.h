@@ -125,6 +125,117 @@ protected:
 	bool _isNewPhone;
 };
 
+// AR 157, "Telephone" in Nancy16 - the bedside phone in S3561, RED_PhoneBXCU.
+// It is the same idea as Telephone but not the same record: Nancy16 threw out
+// the ring/hang-up/bad-number sounds, the address-book and dial-again texts and
+// the per-call sound and caption, and left the keypad, the numbers and an event
+// flag per number. Everything that happens after a number connects is a sibling
+// record in the scene keyed on that flag - which is why reusing the Telephone
+// class here would mean disabling most of its state machine.
+//
+// Layout, 1214/1214 bytes exact on the single record:
+//
+//   uint16     digits in a phone number (13)
+//   uint16     always 0
+//   float      always 10.0
+//   float      always 1.0
+//   uint16     number count (3)
+//     per number, 43 bytes:
+//       char[33] the number
+//       int16    event flag, -1 in all three, and its byte value
+//       uint16   scene, 0x7fff ("stay here") in all three
+//       uint16   frame
+//       int16    event flag, and its byte value - 1041, 1042, 1043
+//   uint16     always 29
+//   char[33]   keypad atlas, RED_PhoneBXCU_OVL, the lit face of each button
+//   float      always 0.1
+//   uint16     button count (12)
+//     per button, 76 bytes:
+//       byte     the character it dials, ASCII
+//       RECT     source in the atlas
+//       RECT     destination in the viewport
+//       group    the sound it makes
+//   uint16     always 1
+//   char[33]   dialling prefix, "011"
+//   int32      always 10, twice - the digits after the prefix
+//   uint16     scene to fall back to, 3599 (the same room), + frame/flag/value
+//   group      dial tone
+//   uint16     action zone count, + 23 bytes each
+//
+// The third number is the empty string, which is what a wrong number connects
+// to: its flag, 1043, is the one whose sibling scene change goes to S3599, the
+// same room again. The exit zone raises 1040, and the scene's AR 145 turns that
+// into the hang-up sound and the change back to S3560.
+class Nancy16Telephone : public RenderActionRecord {
+public:
+	Nancy16Telephone() : RenderActionRecord(7) {}
+	virtual ~Nancy16Telephone() {}
+
+	void init() override;
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+	void handleInput(NancyInput &input) override;
+
+	bool isViewportRelative() const override { return true; }
+
+protected:
+	Common::String getRecordTypeName() const override { return "Nancy16Telephone"; }
+	Common::String getRecordExtraInfo() const override;
+
+	struct Button {
+		char label = 0;
+		Common::Rect src;
+		Common::Rect dest;
+		SoundDescription sound;
+	};
+
+	struct Call {
+		Common::String number;
+		FlagDescription flagA;
+		SceneChangeDescription scene;
+		FlagDescription flagB;
+	};
+
+	struct Zone {
+		Common::Rect hotspot;
+		uint16 cursorType = 0;
+		SceneChangeDescription scene;
+		FlagDescription flag;
+	};
+
+	int buttonAtCursor(const Common::Point &mousePos) const;
+	int zoneAtCursor(const Common::Point &mousePos) const;
+
+	// Index of the number `_dialled` has completed, or -1. See the .cpp for why
+	// the prefix is accepted both typed and implied.
+	int matchedCall() const;
+
+	void press(uint button);
+	void redraw();
+
+	// -- File data --
+	uint16 _numberLength = 0;
+	Common::Array<Call> _calls;
+	Common::Path _imageName;
+	Common::Array<Button> _buttons;
+	Common::String _prefix;
+	SceneChangeWithFlag _reloadScene;
+	SoundDescription _dialTone;
+	Common::Array<Zone> _zones;
+
+	// -- Runtime state --
+	Graphics::ManagedSurface _image;
+	Common::String _dialled;
+	int _litButton = -1;
+	uint32 _litUntil = 0;
+	bool _dialTonePlaying = false;
+	bool _connected = false;
+	bool _zoneRequested = false;
+	SceneChangeDescription _pendingScene;
+	FlagDescription _pendingFlag;
+};
+
 } // End of namespace Action
 } // End of namespace Nancy
 

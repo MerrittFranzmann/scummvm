@@ -49,6 +49,19 @@ public:
 	void redrawAll();
 	void suppressNextDraw();
 
+	// The colour every dirty rect is reset to before it is recomposited, i.e.
+	// what shows wherever no object paints - the matte around the viewport and
+	// the strip between the taskbar icon groups. This is the game's own
+	// BackgroundColor setting: the retail INI ships BackgroundColor=4278190080,
+	// which is 0xff000000, which is COLR chunk 4 - and 4 is exactly the parameter
+	// the options screen's "black" swatch sends to Engine_Matte. Stored ARGB.
+	//
+	// Must stay opaque. GraphicsManager::draw relies on the destination alpha
+	// being 0xff for translucent widgets to composite correctly; see the long
+	// comment at the fill itself.
+	void setMatteColour(uint32 argb) { _matteColour = argb | 0xff000000; }
+	uint32 getMatteColour() const { return _matteColour; }
+
 	const Font *getFont(uint id) const { return id < _fonts.size() ? &_fonts[id] : nullptr; }
 	const Graphics::Screen *getScreen() { return &_screen; }
 
@@ -99,6 +112,10 @@ private:
 	Common::HashMap<uint16, Common::Rect> _autotextSurfaceBounds;
 
 	uint32 _transColor = 0;
+
+	// Black until the options screen says otherwise, which is also the value the
+	// retail INI ships.
+	uint32 _matteColour = 0xff000000;
 
 	bool _isSuppressed;
 };

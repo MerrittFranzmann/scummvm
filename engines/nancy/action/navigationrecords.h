@@ -236,6 +236,58 @@ protected:
 	Common::String getRecordTypeName() const override { return "MapCallHotMultiframe"; }
 };
 
+// Nancy16 type 25, "Scene Change with The Works". 66 records, all in navigation
+// hubs (OFF_Node, PIA_node, REDX, KIO_F). Validates 51 + 18*numHotspots on 66/66:
+//
+//   uint16   sceneID, frameID, continueSceneSound
+//   char[33] name        empty in 66/66
+//   uint16   1 in 66/66
+//   int16    flag label, uint16 flag value   raised when the change fires
+//   uint32   cursor
+//   uint16   numHotspots, then numHotspots x (uint16 frameID + RECT)
+class SceneChangeTheWorks : public HotMultiframeSceneChange {
+public:
+	SceneChangeTheWorks() : HotMultiframeSceneChange(CursorManager::kHotspot) {}
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+	bool cursorSetFromScript() const override { return true; }
+
+	FlagDescription _flag;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SceneChangeTheWorks"; }
+};
+
+// Nancy16 type 21, "Scene Change with Frame and Stream". A bare 6-byte scene
+// change descriptor followed by the 33-byte name of the stream the change is
+// addressed to - 39 bytes on 4/4. Nancy16 can run more than one scene flow at
+// once: AR 26 begins a named stream at a scene, AR 27 ends one, and AR 93
+// watches one for scene changes. This record is how a scene running inside a
+// side stream moves the flow the player is actually looking at, which is why
+// three of the four live in stream target scenes (S3199, S5450 x2) and only
+// S6431 is reachable by ordinary navigation.
+//
+// All four name "MainStream", the player's flow, so the change is applied to the
+// main flow explicitly - bypassing the redirect that would otherwise send a
+// scene change made inside a stream to that stream. This is the record that
+// lets s3199, the backgroundless script the "OFF_Hide" stream runs, move the
+// player to s2960 once Fango has opened the door.
+//
+// A change addressed to a stream this runtime is not running is dropped rather
+// than guessed at - applying it to the main flow would teleport the player.
+class SceneChangeWithStream : public SceneChange {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+	Common::String _streamName;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SceneChangeWithStream"; }
+};
+
 } // End of namespace Action
 } // End of namespace Nancy
 

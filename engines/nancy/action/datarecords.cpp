@@ -323,6 +323,12 @@ void ValueTest::execute() {
 }
 
 void EventFlags::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && !_isTerse) {
+		// Count-prefixed from Nancy16. Verified exact on all 1102 type-90 records.
+		_flags.readDataCounted(stream);
+		return;
+	}
+
 	if (!_isTerse) {
 		_flags.readData(stream);
 	} else {
@@ -343,7 +349,11 @@ void EventFlagsMultiHS::readData(Common::SeekableReadStream &stream) {
 	EventFlags::readData(stream);
 
 	if (_isCursor) {
-		_hoverCursor = (CursorManager::CursorType)stream.readUint16LE();
+		// Nancy16 widened the cursor field to 32 bits. Both this and the counted
+		// flag list above are needed to consume all 1735 type-91 records exactly;
+		// a 16-bit read here matches 0 of them.
+		_hoverCursor = (CursorManager::CursorType)(g_nancy->getGameType() >= kGameTypeNancy16 ?
+			stream.readUint32LE() : stream.readUint16LE());
 	}
 
 	uint16 numHotspots = stream.readUint16LE();
@@ -407,12 +417,72 @@ void EventFlagsMultiHS::execute() {
 void RandomizeEventFlags::readData(Common::SeekableReadStream &stream) {
 	uint16 numFlags = stream.readUint16LE();
 	_flagLabels.resize(numFlags);
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// 7 bytes per entry rather than 2: the label, the value to set, and a
+		// 32-bit weight. count*7+2 consumes 68/68 records exactly.
+		_flagValues.resize(numFlags);
+		_weights.resize(numFlags);
+
+		for (uint i = 0; i < numFlags; ++i) {
+			_flagLabels[i] = stream.readSint16LE();
+			_flagValues[i] = stream.readByte();
+			_weights[i] = stream.readUint32LE();
+		}
+
+		return;
+	}
+
 	for (uint i = 0; i < numFlags; ++i) {
 		_flagLabels[i] = stream.readSint16LE();
 	}
 }
 
+Common::String RandomizeEventFlags::getRecordExtraInfo() const {
+	Common::String out;
+	for (uint i = 0; i < _flagLabels.size(); ++i) {
+		if (i) {
+			out += ", ";
+		}
+
+		if (i < _weights.size()) {
+			out += Common::String::format("%d = %d @ %u", _flagLabels[i], _flagValues[i], _weights[i]);
+		} else {
+			out += Common::String::format("%d", _flagLabels[i]);
+		}
+	}
+
+	return out;
+}
+
 void RandomizeEventFlags::execute() {
+	// See the header: in Nancy16 this is a weighted table from which exactly one
+	// entry fires, not a per-flag coin toss. Rolling each flag separately made
+	// S5480 raise two of 1041/1042/1043 at once, which typed two game-over cards
+	// on top of each other, and made every one of S2600's {flag = 1, 20} /
+	// {flag = 0, 80} pairs a 50/50 that then overwrote itself.
+	if (!_weights.empty() && _weights.size() == _flagLabels.size()) {
+		uint32 total = 0;
+		for (uint i = 0; i < _weights.size(); ++i) {
+			total += _weights[i];
+		}
+
+		if (total) {
+			uint32 roll = g_nancy->_randomSource->getRandomNumber(total - 1);
+			for (uint i = 0; i < _weights.size(); ++i) {
+				if (roll < _weights[i]) {
+					NancySceneState.setEventFlag(_flagLabels[i], _flagValues[i]);
+					break;
+				}
+
+				roll -= _weights[i];
+			}
+		}
+
+		_isDone = true;
+		return;
+	}
+
 	for (uint i = 0; i < _flagLabels.size(); ++i) {
 		NancySceneState.setEventFlag(_flagLabels[i],
 			g_nancy->_randomSource->getRandomBit() ? g_nancy->_true : g_nancy->_false);
@@ -518,6 +588,16 @@ void ModifyListEntry::execute() {
 	}
 
 	finishExecution();
+}
+
+void Nancy16JournalEntry::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _page);
+	readFilename(stream, _stringID);
+}
+
+void Nancy16TaskEntry::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _stringID);
+	_completionFlag = stream.readUint16LE();
 }
 
 Common::String ModifyListEntry::getRecordTypeName() const {

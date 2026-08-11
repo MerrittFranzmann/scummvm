@@ -26,6 +26,7 @@
 #include "engines/nancy/input.h"
 #include "engines/nancy/util.h"
 #include "engines/nancy/font.h"
+#include "engines/nancy/cursor.h"
 
 #include "engines/nancy/action/puzzle/telephone.h"
 
@@ -573,6 +574,337 @@ void Telephone::handleInput(NancyInput &input) {
 		}
 	}
 }
+
+
+// -- AR 157 in Nancy16 ----------------------------------------------------
+
+// The Nancy16 counted sound group: uint16 count, count x char[33], uint16
+// channel, uint32 loop count, uint16 volume.
+static void readSoundGroup(Common::SeekableReadStream &stream, SoundDescription &desc) {
+	RandomSoundBlock block;
+	block.readData(stream);
+
+	if (block.names.empty()) {
+		return;
+	}
+
+	desc.name = block.names[0];
+	desc.channelID = block.channel;
+	desc.numLoops = block.numLoops > 0 ? block.numLoops : 1;
+	desc.volume = block.volume;
+}
+
+// The game's short scene change: uint16 scene (0x7fff for "stay here"), uint16
+// frame, int16 event flag, byte value.
+static void readShortSceneChange(Common::SeekableReadStream &stream, SceneChangeWithFlag &out) {
+	out._sceneChange.sceneID = stream.readUint16LE();
+	if (out._sceneChange.sceneID == kNancy16NoScene) {
+		out._sceneChange.sceneID = kNoScene;
+	}
+
+	out._sceneChange.frameID = stream.readUint16LE();
+	out._sceneChange.continueSceneSound = kContinueSceneSound;
+	out._flag.label = stream.readSint16LE();
+	out._flag.flag = stream.readByte();
+}
+
+void Nancy16Telephone::readData(Common::SeekableReadStream &stream) {
+	_numberLength = stream.readUint16LE();
+	stream.skip(2);		// always 0
+	stream.skip(4);		// float, always 10.0
+	stream.skip(4);		// float, always 1.0
+
+	const uint16 numCalls = stream.readUint16LE();
+	_calls.resize(numCalls);
+	for (uint i = 0; i < numCalls; ++i) {
+		Call &c = _calls[i];
+		readFilename(stream, c.number);
+		c.flagA.label = stream.readSint16LE();
+		c.flagA.flag = stream.readByte();
+
+		SceneChangeWithFlag scene;
+		readShortSceneChange(stream, scene);
+		c.scene = scene._sceneChange;
+		c.flagB = scene._flag;
+	}
+
+	stream.skip(2);		// always 29
+	readFilename(stream, _imageName);
+	stream.skip(4);		// float, always 0.1
+
+	const uint16 numButtons = stream.readUint16LE();
+	_buttons.resize(numButtons);
+	for (uint i = 0; i < numButtons; ++i) {
+		Button &b = _buttons[i];
+		b.label = (char)stream.readByte();
+		readRect(stream, b.src);
+		readRect(stream, b.dest);
+		readSoundGroup(stream, b.sound);
+
+		if (i == 0) {
+			_screenPosition = b.dest;
+		} else {
+			_screenPosition.extend(b.dest);
+		}
+	}
+
+	stream.skip(2);		// always 1, the length of the prefix list below
+	readFilename(stream, _prefix);
+	stream.skip(4);		// always 10, the digits after the prefix
+	stream.skip(4);		// always 10 as well
+
+	readShortSceneChange(stream, _reloadScene);
+	readSoundGroup(stream, _dialTone);
+
+	const uint16 numZones = stream.readUint16LE();
+	_zones.resize(numZones);
+	for (uint i = 0; i < numZones; ++i) {
+		Zone &z = _zones[i];
+		readRect(stream, z.hotspot);
+		z.cursorType = stream.readUint16LE();
+
+		SceneChangeWithFlag scene;
+		scene._sceneChange.frameID = 0;
+		z.scene.sceneID = stream.readUint16LE();
+		if (z.scene.sceneID == kNancy16NoScene) {
+			z.scene.sceneID = kNoScene;
+		}
+
+		z.scene.continueSceneSound = kContinueSceneSound;
+		z.flag.label = stream.readSint16LE();
+		z.flag.flag = stream.readByte();
+	}
+}
+
+Common::String Nancy16Telephone::getRecordExtraInfo() const {
+	Common::String ret = Common::String::format("Keypad \"%s\", %u buttons, %u-digit numbers, prefix \"%s\"\n",
+		_imageName.toString().c_str(), _buttons.size(), _numberLength, _prefix.c_str());
+
+	for (uint i = 0; i < _calls.size(); ++i) {
+		ret += Common::String::format("    number \"%s\" -> flag %d (%s) = %u, scene %u\n",
+			_calls[i].number.c_str(), _calls[i].flagB.label,
+			g_nancy->getEventFlagName(_calls[i].flagB.label).c_str(),
+			_calls[i].flagB.flag, _calls[i].scene.sceneID);
+	}
+
+	for (uint i = 0; i < _zones.size(); ++i) {
+		ret += Common::String::format("    zone (%d,%d,%d,%d), cursor %u, scene %u, flag %d = %u\n",
+			_zones[i].hotspot.left, _zones[i].hotspot.top, _zones[i].hotspot.right, _zones[i].hotspot.bottom,
+			_zones[i].cursorType, _zones[i].scene.sceneID, _zones[i].flag.label, _zones[i].flag.flag);
+	}
+
+	return ret;
+}
+
+void Nancy16Telephone::init() {
+	g_nancy->_resource->loadImage(_imageName, _image);
+
+	_drawSurface.create(_screenPosition.width(), _screenPosition.height(), g_nancy->_graphics->getInputPixelFormat());
+	_drawSurface.clear(g_nancy->_graphics->getTransColor());
+	setTransparent(true);
+	setVisible(true);
+}
+
+int Nancy16Telephone::buttonAtCursor(const Common::Point &mousePos) const {
+	for (uint i = 0; i < _buttons.size(); ++i) {
+		if (NancySceneState.getViewport().convertViewportToScreen(_buttons[i].dest).contains(mousePos)) {
+			return (int)i;
+		}
+	}
+
+	return -1;
+}
+
+int Nancy16Telephone::zoneAtCursor(const Common::Point &mousePos) const {
+	for (uint i = 0; i < _zones.size(); ++i) {
+		if (NancySceneState.getViewport().convertViewportToScreen(_zones[i].hotspot).contains(mousePos)) {
+			return (int)i;
+		}
+	}
+
+	return -1;
+}
+
+// GUESSED, in the safe direction: the record carries both a 13-digit number and
+// a "011" prefix with a count of ten digits after it, and nothing in it says
+// whether the player is expected to dial the prefix or whether the phone
+// supplies it. A number is therefore accepted either way - typed in full, or
+// typed without the prefix - which cannot turn a right number into a wrong one
+// under either reading. The empty number, if the record has one, is the
+// wrong-number case and only matches once the full length has been dialled.
+int Nancy16Telephone::matchedCall() const {
+	if (_dialled.empty()) {
+		return -1;
+	}
+
+	for (uint i = 0; i < _calls.size(); ++i) {
+		const Common::String &number = _calls[i].number;
+		if (number.empty()) {
+			continue;
+		}
+
+		if (number == _dialled || number == _prefix + _dialled) {
+			return (int)i;
+		}
+	}
+
+	if (_dialled.size() < _numberLength) {
+		return -1;
+	}
+
+	for (uint i = 0; i < _calls.size(); ++i) {
+		if (_calls[i].number.empty()) {
+			return (int)i;
+		}
+	}
+
+	return -1;
+}
+
+void Nancy16Telephone::redraw() {
+	_drawSurface.clear(g_nancy->_graphics->getTransColor());
+
+	// The atlas holds the lit face of each button, so the only thing ever drawn
+	// is the one being pressed; the unlit keypad is the scene background.
+	if (_litButton >= 0) {
+		const Button &b = _buttons[_litButton];
+		_drawSurface.blitFrom(_image, b.src,
+			Common::Point(b.dest.left - _screenPosition.left, b.dest.top - _screenPosition.top));
+	}
+
+	setNeedsRedraw(true);
+}
+
+void Nancy16Telephone::press(uint button) {
+	if (_dialTonePlaying) {
+		g_nancy->_sound->stopSound(_dialTone);
+		_dialTonePlaying = false;
+	}
+
+	g_nancy->_sound->loadSound(_buttons[button].sound);
+	g_nancy->_sound->playSound(_buttons[button].sound);
+
+	_litButton = (int)button;
+	_litUntil = g_nancy->getTotalPlayTime() + 250;
+	redraw();
+
+	if (_dialled.size() < _numberLength) {
+		_dialled += _buttons[button].label;
+	}
+
+	const int call = matchedCall();
+	if (call < 0) {
+		return;
+	}
+
+	// The number connects. The scene change is a sibling record's job - each
+	// number's flag has its own AR 16 in the scene, which waits for the last
+	// button beep to finish before it fires - so all this record does is raise
+	// the flags and stop taking input.
+	_connected = true;
+	NancySceneState.setEventFlag(_calls[call].flagA);
+	NancySceneState.setEventFlag(_calls[call].flagB);
+
+	// Fallback for a game whose data does not have the scene's own AR 16s: the
+	// number's own scene, then the record's reload scene. Both are "stay here"
+	// in nancy18, so neither fires.
+	if (_calls[call].scene.sceneID != kNoScene) {
+		_pendingScene = _calls[call].scene;
+		_zoneRequested = true;
+	} else if (_reloadScene._sceneChange.sceneID != kNoScene && _calls[call].number.empty()) {
+		_pendingScene = _reloadScene._sceneChange;
+		_pendingFlag = _reloadScene._flag;
+		_zoneRequested = true;
+	}
+}
+
+void Nancy16Telephone::execute() {
+	switch (_state) {
+	case kBegin:
+		init();
+		registerGraphics();
+		NancySceneState.setNoHeldItem();
+
+		g_nancy->_sound->loadSound(_dialTone);
+		g_nancy->_sound->playSound(_dialTone);
+		_dialTonePlaying = true;
+
+		_state = kRun;
+		// fall through
+	case kRun:
+		// GUESSED: the atlas holds the darkened face of each key, so it can only
+		// be the pressed state, but nothing in the record says how long a key
+		// stays down. It is held for as long as that key's beep lasts, with a
+		// quarter-second floor so a missing sound still shows something.
+		if (_litButton >= 0 && g_nancy->getTotalPlayTime() > _litUntil &&
+				!g_nancy->_sound->isSoundPlaying(_buttons[_litButton].sound)) {
+			_litButton = -1;
+			redraw();
+		}
+
+		if (_zoneRequested) {
+			_state = kActionTrigger;
+		}
+
+		break;
+	case kActionTrigger:
+		if (_dialTonePlaying) {
+			g_nancy->_sound->stopSound(_dialTone);
+			_dialTonePlaying = false;
+		}
+
+		NancySceneState.setEventFlag(_pendingFlag);
+		NancySceneState.changeScene(_pendingScene);
+		finishExecution();
+		break;
+	}
+}
+
+void Nancy16Telephone::handleInput(NancyInput &input) {
+	if (_state != kRun || _connected || _zoneRequested) {
+		return;
+	}
+
+	const int zone = zoneAtCursor(input.mousePos);
+	if (zone != -1) {
+		g_nancy->_cursor->setCursorType(_zones[zone].cursorType ?
+			(CursorManager::CursorType)_zones[zone].cursorType : g_nancy->_cursor->_puzzleExitCursor, true);
+
+		if (input.input & NancyInput::kLeftMouseButtonUp) {
+			// The zone in nancy18 has no scene of its own: it raises flag 1040,
+			// and the scene's AR 145 plays the hang-up sound and does the
+			// leaving. So the flag is raised here and the record keeps running.
+			NancySceneState.setEventFlag(_zones[zone].flag);
+
+			if (_zones[zone].scene.sceneID != kNoScene) {
+				_pendingScene = _zones[zone].scene;
+				_zoneRequested = true;
+			} else {
+				_connected = true;
+			}
+
+			if (_dialTonePlaying) {
+				g_nancy->_sound->stopSound(_dialTone);
+				_dialTonePlaying = false;
+			}
+
+			input.eatMouseInput();
+		}
+
+		return;
+	}
+
+	const int button = buttonAtCursor(input.mousePos);
+	if (button != -1) {
+		g_nancy->_cursor->setCursorType(CursorManager::kHotspot);
+
+		if (input.input & NancyInput::kLeftMouseButtonUp) {
+			press((uint)button);
+			input.eatMouseInput();
+		}
+	}
+}
+
 
 } // End of namespace Action
 } // End of namespace Nancy

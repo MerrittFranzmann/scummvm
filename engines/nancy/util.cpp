@@ -36,8 +36,12 @@ void readRect(Common::SeekableReadStream &stream, Common::Rect &inRect) {
 	inRect.right = stream.readSint32LE();
 	inRect.bottom = stream.readSint32LE();
 
-	// TVD's rects are non-inclusive
-	if (g_nancy->getGameType() > kGameTypeVampire && !inRect.isEmpty()) {
+	// Inclusive for Nancy1 through Nancy15 only. TVD is non-inclusive, and so is
+	// Nancy16+: measured against two independent assets, the VIEW rect and the
+	// PlaySecondaryMovie dest both come out exactly one pixel oversized under the
+	// inclusive reading and exactly right without it.
+	if (g_nancy->getGameType() > kGameTypeVampire && g_nancy->getGameType() < kGameTypeNancy16
+			&& !inRect.isEmpty()) {
 		++inRect.right;
 		++inRect.bottom;
 	}
@@ -51,8 +55,8 @@ void readRect(Common::Serializer &stream, Common::Rect &inRect, Common::Serializ
 		stream.syncAsSint32LE(inRect.right);
 		stream.syncAsSint32LE(inRect.bottom);
 
-		// TVD's rects are non-inclusive
-		if (version > kGameTypeVampire && !inRect.isEmpty()) {
+		// See the note in the SeekableReadStream overload above.
+		if (version > kGameTypeVampire && version < kGameTypeNancy16 && !inRect.isEmpty()) {
 			++inRect.right;
 			++inRect.bottom;
 		}
@@ -63,7 +67,9 @@ void readRectArray(Common::SeekableReadStream &stream, Common::Array<Common::Rec
 	uint startSize = inArray.size();
 	inArray.resize(num + startSize);
 
-	for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+	// A count of zero is legitimate, and taking &inArray[startSize] then asserts
+	// on the one-past-the-end index. A mis-mapped record reaches here easily.
+	for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 		readRect(stream, *rect);
 	}
 
@@ -80,14 +86,16 @@ void readRectArray(Common::Serializer &stream, Common::Array<Common::Rect> &inAr
 		uint startSize = inArray.size();
 		inArray.resize(num + startSize);
 
-		for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+		// See the note in the SeekableReadStream overload: a zero count must not
+		// index one past the end.
+		for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 			stream.syncAsSint32LE(rect->left);
 			stream.syncAsSint32LE(rect->top);
 			stream.syncAsSint32LE(rect->right);
 			stream.syncAsSint32LE(rect->bottom);
 
-			// TVD's rects are non-inclusive
-			if (version > kGameTypeVampire && !rect->isEmpty()) {
+			// Same rule as readRect(): inclusive for Nancy1-15 only.
+			if (version > kGameTypeVampire && version < kGameTypeNancy16 && !rect->isEmpty()) {
 				++rect->right;
 				++rect->bottom;
 			}
@@ -134,7 +142,9 @@ void readRectArray16(Common::SeekableReadStream &stream, Common::Array<Common::R
 	uint startSize = inArray.size();
 	inArray.resize(num + startSize);
 
-	for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+	// A count of zero is legitimate, and taking &inArray[startSize] then asserts
+	// on the one-past-the-end index. A mis-mapped record reaches here easily.
+	for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 		readRect16(stream, *rect);
 	}
 
@@ -151,14 +161,16 @@ void readRectArray16(Common::Serializer &stream, Common::Array<Common::Rect> &in
 		uint startSize = inArray.size();
 		inArray.resize(num + startSize);
 
-		for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+		// See the note in the SeekableReadStream overload: a zero count must not
+		// index one past the end.
+		for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 			stream.syncAsSint16LE(rect->left);
 			stream.syncAsSint16LE(rect->top);
 			stream.syncAsSint16LE(rect->right);
 			stream.syncAsSint16LE(rect->bottom);
 
-			// TVD's rects are non-inclusive
-			if (version > kGameTypeVampire && !rect->isEmpty()) {
+			// Same rule as readRect(): inclusive for Nancy1-15 only.
+			if (version > kGameTypeVampire && version < kGameTypeNancy16 && !rect->isEmpty()) {
 				++rect->right;
 				++rect->bottom;
 			}

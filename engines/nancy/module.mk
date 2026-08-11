@@ -6,6 +6,7 @@ MODULE_OBJS = \
   action/actionzone.o \
   action/arfactory.o \
   action/autotext.o \
+  action/collectionrecords.o \
   action/datarecords.o \
   action/inventoryrecords.o \
   action/navigationrecords.o \
@@ -16,6 +17,7 @@ MODULE_OBJS = \
   action/overlay.o \
   action/secondarymovie.o \
   action/secondaryvideo.o \
+  action/textscroll16.o \
   action/puzzle/angletosspuzzle.o \
   action/puzzle/arcadepuzzle.o \
   action/puzzle/assemblypuzzle.o \
@@ -26,28 +28,37 @@ MODULE_OBJS = \
   action/puzzle/bulpuzzle.o \
   action/puzzle/bombpuzzle.o \
   action/puzzle/cardgamepuzzle.o \
+  action/puzzle/chasemappuzzle.o \
   action/puzzle/collisionpuzzle.o \
   action/puzzle/cubepuzzle.o \
   action/puzzle/cuttingpuzzle.o \
+  action/puzzle/dancepuzzle.o \
   action/puzzle/dotconnectpuzzle.o \
+  action/puzzle/draggableimagepuzzle.o \
   action/puzzle/drivingpuzzle.o \
   action/puzzle/dropsortpuzzle.o \
+  action/puzzle/electrosensorspuzzle.o \
   action/puzzle/gridmappuzzle.o \
   action/puzzle/hamradiopuzzle.o \
+  action/puzzle/laptoppasswordpuzzle.o \
   action/puzzle/leverpuzzle.o \
+  action/puzzle/lockpickpuzzle.o \
   action/puzzle/magnetmazepuzzle.o \
   action/puzzle/mazechasepuzzle.o \
   action/puzzle/matchpuzzle.o \
   action/puzzle/memorypuzzle.o \
+  action/puzzle/microdotautoplay.o \
   action/puzzle/mindpuzzle.o \
   action/puzzle/minigolfpuzzle.o \
   action/puzzle/mirrorlightpuzzle.o \
+  action/puzzle/mosaicpuzzle.o \
   action/puzzle/mouselightpuzzle.o \
   action/puzzle/multibuildpuzzle.o \
   action/puzzle/onebuildpuzzle.o \
   action/puzzle/orderingpuzzle.o \
   action/puzzle/overridelockpuzzle.o \
   action/puzzle/pachinkopuzzle.o \
+  action/puzzle/paperdollpuzzle.o \
   action/puzzle/passwordpuzzle.o \
   action/puzzle/peepholepuzzle.o \
   action/puzzle/pegspuzzle.o \
@@ -58,6 +69,8 @@ MODULE_OBJS = \
   action/puzzle/rotatinglockpuzzle.o \
   action/puzzle/safedialpuzzle.o \
   action/puzzle/scalepuzzle.o \
+  action/puzzle/scopapuzzle.o \
+  action/puzzle/sentrypuzzle.o \
   action/puzzle/setplayerclock.o \
   action/puzzle/sewingmachinepuzzle.o \
   action/puzzle/sliderpuzzle.o \
@@ -65,6 +78,7 @@ MODULE_OBJS = \
   action/puzzle/soundequalizerpuzzle.o \
   action/puzzle/soundmatchpuzzle.o \
   action/puzzle/spigotpuzzle.o \
+  action/puzzle/stakeoutpuzzle.o \
   action/puzzle/stepobjectspuzzle.o \
   action/puzzle/tangrampuzzle.o \
   action/puzzle/telephone.o \
@@ -72,6 +86,10 @@ MODULE_OBJS = \
   action/puzzle/turningpuzzle.o \
   action/puzzle/twodialpuzzle.o \
   action/puzzle/typingquizpuzzle.o \
+  action/puzzle/vaultgaugeautoplay.o \
+  action/puzzle/chesscodepuzzle.o \
+  action/puzzle/watermazeautoplay.o \
+  action/puzzle/whackitpuzzle.o \
   action/puzzle/whalesurvivorpuzzle.o \
   action/puzzle/wordfindpuzzle.o \
   ui/fullscreenimage.o \
@@ -115,11 +133,16 @@ MODULE_OBJS = \
   input.o \
   metaengine.o \
   nancy.o \
+  ndui.o \
+  nduipanel.o \
+  ttffont.o \
   puzzledata.o \
   renderobject.o \
   resource.o \
   sound.o \
   sound_vorbis.o \
+  streams.o \
+  trace.o \
   util.o \
   video.o
 

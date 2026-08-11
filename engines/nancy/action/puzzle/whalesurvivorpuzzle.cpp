@@ -22,6 +22,7 @@
 #include "common/random.h"
 
 #include "engines/nancy/nancy.h"
+#include "engines/nancy/trace.h"
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/resource.h"
 #include "engines/nancy/sound.h"
@@ -259,7 +260,7 @@ void WhaleSurvivorPuzzle::initRound() {
 	_startButtonHeld   = false;
 	_quitButtonHeld    = false;
 
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 
 	if (!_isHardMode) {
 		_porpX = (float)(_playfieldRect.left + (_playfieldRect.width() - _porpWidth) / 2);
@@ -349,7 +350,7 @@ void WhaleSurvivorPuzzle::spawnEntity(EntityKind kind) {
 	if (slot < 0)
 		return;
 
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 	int spawnRange = (_spawnYMax - _spawnYMin) + 1;
 
 	Entity &e = _entities[slot];
@@ -598,7 +599,7 @@ void WhaleSurvivorPuzzle::updateGame(uint32 nowMs) {
 				_oxygenStage      = 0;
 				_oxygenNextTickMs = 0;
 				if (wasBelow) {
-					Common::RandomSource &rnd = *g_nancy->_randomSource;
+					NancyRandomSource &rnd = *g_nancy->_randomSource;
 					bool doBreath = (_breathFreq <= 1) ||
 					                (rnd.getRandomNumber(_breathFreq - 1) == _breathFreq - 1);
 					if (doBreath) {

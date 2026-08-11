@@ -31,6 +31,27 @@
 namespace Nancy {
 
 void SceneChangeDescription::readData(Common::SeekableReadStream &stream, bool longFormat) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 shrank this descriptor from 20 bytes to 6: the vertical offset
+		// and the 12-byte listener front vector are both gone. Confirmed on the
+		// 875 "scene change with frame" action records, whose entire payload is
+		// one descriptor and is 6 bytes in 875/875.
+		sceneID = stream.readUint16LE();
+		frameID = stream.readUint16LE();
+		continueSceneSound = stream.readUint16LE();
+		frontVectorFrameID = frameID;
+
+		// Nancy16 uses 0x7fff as its "no scene" sentinel, where ScummVM's
+		// kNoScene is 9999. Normalise here so every guard in the engine keeps
+		// working; otherwise a "don't change scene" record is taken literally and
+		// the engine tries to open a member called S32767.
+		if (sceneID == kNancy16NoScene) {
+			sceneID = kNoScene;
+		}
+
+		return;
+	}
+
 	sceneID = stream.readUint16LE();
 	frameID = stream.readUint16LE();
 	verticalOffset = stream.readUint16LE();
@@ -116,14 +137,24 @@ void FrameBlitDescription::readData(Common::SeekableReadStream &stream, bool lon
 }
 
 void MultiEventFlagDescription::readData(Common::SeekableReadStream &stream) {
-	for (uint i = 0; i < 10; ++i) {
+	descs.resize(10);
+	for (uint i = 0; i < descs.size(); ++i) {
+		descs[i].label = stream.readSint16LE();
+		descs[i].flag = stream.readUint16LE();
+	}
+}
+
+void MultiEventFlagDescription::readDataCounted(Common::SeekableReadStream &stream) {
+	// Nancy16+: an explicit count rather than a fixed ten
+	descs.resize(stream.readUint16LE());
+	for (uint i = 0; i < descs.size(); ++i) {
 		descs[i].label = stream.readSint16LE();
 		descs[i].flag = stream.readUint16LE();
 	}
 }
 
 void MultiEventFlagDescription::execute() {
-	for (uint i = 0; i < 10; ++i) {
+	for (uint i = 0; i < descs.size(); ++i) {
 		NancySceneState.setEventFlag(descs[i]);
 	}
 }

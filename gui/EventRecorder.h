@@ -194,9 +194,13 @@ public:
 
 private:
 
-#ifdef USE_IMGUI
+	// NOT inside #ifdef USE_IMGUI. Its definition is unconditional and already
+	// answers false when ImGui is absent (`#else return false`), and four call
+	// sites - pollEvent, processMillis and the two switchMode paths - are
+	// likewise unguarded. Guarding only the declaration makes
+	// --enable-eventrecorder fail to build in any configuration without ImGui,
+	// which is every SDL build that does not opt into it.
 	bool isImGuiRecorderEnabled() const;
-#endif
 
 	bool pollEvent(Common::Event &ev) override;
 	bool notifyEvent(const Common::Event &event) override;

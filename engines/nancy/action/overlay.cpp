@@ -31,6 +31,7 @@
 
 #include "engines/nancy/state/scene.h"
 
+#include "common/random.h"
 #include "common/serializer.h"
 
 #include "graphics/font.h"
@@ -80,8 +81,17 @@ void Overlay::updateGraphics() {
 	// which is one of a set of sprites each shown for a different resource range - must be
 	// visible only while its dependency currently holds. (With the usual set-once event
 	// flags _isActive never drops back to false, so this is a no-op there.)
+	//
+	// It must ALSO still be on a viewport frame that has a blit for it. Without
+	// the second term this line re-shows a static overlay the moment execute()
+	// has correctly hidden it on a viewport frame it does not belong to, and it
+	// is repainted with the _drawSurface and _screenPosition of whichever frame
+	// it last matched. In a panoramic node that means every one of the node's
+	// overlays piles onto every viewpoint, each a patch of the room as seen from
+	// somewhere else. Nancy18 scenes 2910, 3210 and 3510 are the game's three
+	// 20-frame nodes carrying static overlays, and all three showed it.
 	if (g_nancy->getGameType() >= kGameTypeNancy12 && _state == kRun && _overlayType == kPlayOverlayStatic) {
-		setVisible(_isActive);
+		setVisible(_isActive && _hasBlitForCurrentFrame);
 	}
 
 	// Update inactive animated overlays
@@ -278,6 +288,7 @@ void Overlay::execute() {
 
 				setVisible(false);
 				_hasHotspot = false;
+				_hasBlitForCurrentFrame = false;
 
 				// First, check if there's more than one blit description for the current viewport frame.
 				// This happens in nancy7 scene 3600
@@ -297,6 +308,7 @@ void Overlay::execute() {
 				if (_overlayType == kPlayOverlayStatic && blitsForThisFrame.size()) {
 					moveTo(destRect);
 					setVisible(true);
+					_hasBlitForCurrentFrame = true;
 
 					if (blitsForThisFrame.size() != 1) {
 						_drawSurface.create(destRect.width(), destRect.height(), _fullSurface.format);
@@ -334,15 +346,36 @@ void Overlay::execute() {
 							}
 						}
 
+						Common::Rect blitDest = _blitDescriptions[blitsForThisFrame[i]].dest;
+
 						// Make sure the srcRect doesn't extend beyond the image.
 						// This fixes nancy7 scene 4228
-						srcRect.clip(_fullSurface.getBounds());
+						Common::Rect clippedSrc = srcRect;
+						clippedSrc.clip(_fullSurface.getBounds());
+
+						if (clippedSrc != srcRect) {
+							// Clipping the source but not the destination makes the blit
+							// *stretch* the surviving part of the image over the full authored
+							// destination, because RenderObject scales whenever _drawSurface and
+							// _screenPosition disagree. The original engine simply drops the part
+							// of the blit that falls outside the image, so move the destination
+							// edges by the same amounts the source edges moved.
+							// This fixes nancy18 scene 4460, whose scopa tutorial pages author a
+							// 640-wide source rect against a 591-wide sheet and were being
+							// stretched horizontally by 8%.
+							blitDest.left += clippedSrc.left - srcRect.left;
+							blitDest.top += clippedSrc.top - srcRect.top;
+							blitDest.right += clippedSrc.right - srcRect.right;
+							blitDest.bottom += clippedSrc.bottom - srcRect.bottom;
+							srcRect = clippedSrc;
+						}
 
 						if (blitsForThisFrame.size() == 1) {
+							moveTo(blitDest);
 							_drawSurface.create(_fullSurface, srcRect);
 							setTransparent(_transparency >= kPlayOverlayTransparent);
 						} else {
-							Common::Rect d = _blitDescriptions[blitsForThisFrame[i]].dest;
+							Common::Rect d = blitDest;
 							d.translate(-destRect.left, -destRect.top);
 							_drawSurface.blitFrom(_fullSurface, srcRect, d);
 						}
@@ -406,12 +439,31 @@ Common::String Overlay::getRecordTypeName() const {
 
 void OverlayStaticTerse::readData(Common::SeekableReadStream &stream) {
 	readFilename(stream, _imageName);
-	_transparency = stream.readUint16LE();
-	_z = stream.readUint16LE();
 
 	Common::Rect dest, src;
-	readRect(stream, dest);
-	readRect(stream, src);
+	uint16 frameID = 0;
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 swapped z and transparency, inserted a frame ID, and stores the
+		// source rect before the destination - the reverse of the older order.
+		// 33 + 2 + 2 + 2 + 16 + 16 = 71, exact on all 3349 records in nancy18.
+		_z = stream.readUint16LE();
+		_transparency = stream.readUint16LE();
+
+		// The panorama frame this overlay belongs to. Nonzero on 20 of the game's
+		// 3349 records, and on all 20 it equals the node number in the record's
+		// own image name (PIA_node0013B_OVL -> 13). Skipping it left every
+		// overlay claiming frame 0, so a node drew all of its overlays at once,
+		// each at the destination belonging to a different viewpoint.
+		frameID = stream.readUint16LE();
+		readRect(stream, src);
+		readRect(stream, dest);
+	} else {
+		_transparency = stream.readUint16LE();
+		_z = stream.readUint16LE();
+		readRect(stream, dest);
+		readRect(stream, src);
+	}
 
 	// The source rect only supplies the top-left offset into the image; the overlay
 	// is blitted 1:1, so the source region takes the destination's dimensions. Using
@@ -421,10 +473,273 @@ void OverlayStaticTerse::readData(Common::SeekableReadStream &stream) {
 
 	_srcRects.push_back(srcRect);
 	_blitDescriptions.resize(1);
+	_blitDescriptions[0].frameID = frameID;
 	_blitDescriptions[0].src = Common::Rect(dest.width(), dest.height());
 	_blitDescriptions[0].dest = dest;
 
 	_overlayType = kPlayOverlayStatic;
+}
+
+// The {event flag, sound list} block that appears twice in a Nancy16 AR 53: once
+// for the hover, once for the click. The sound settings are only stored when the
+// list is not empty.
+static void readRolloverBlock(Common::SeekableReadStream &stream, FlagDescription &flag, RandomSoundBlock &sounds) {
+	flag.label = stream.readSint16LE();
+	flag.flag = stream.readByte();
+	sounds.readData(stream);
+}
+
+// Pick one of a rollover block's interchangeable sound names and start it.
+static SoundDescription playRolloverSounds(const RandomSoundBlock &block) {
+	SoundDescription desc;
+	if (block.names.empty()) {
+		return desc;
+	}
+
+	const uint idx = block.names.size() == 1 ? 0 :
+		g_nancy->_randomSource->getRandomNumber(block.names.size() - 1);
+	const Common::String &name = block.names[idx];
+	if (name.empty() || name == "NO SOUND") {
+		return desc;
+	}
+
+	desc.name = name;
+	desc.channelID = block.channel;
+	desc.numLoops = block.numLoops > 0 ? block.numLoops : 1;
+	desc.volume = block.volume;
+
+	g_nancy->_sound->loadSound(desc);
+	g_nancy->_sound->playSound(desc);
+	return desc;
+}
+
+void RolloverOverlay::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _imageName);
+
+	_z = stream.readUint16LE();
+	stream.skip(2);		// 0 in all 75 records; the frame ID slot AR 52 has here
+	_cursorType = stream.readUint16LE();
+
+	readRect(stream, _hotspot);
+	readRect(stream, _srcRect);
+	readRect(stream, _destRect);
+
+	readRolloverBlock(stream, _hoverFlag, _hoverSounds);
+
+	stream.skip(1);		// 0 in 74/75 records
+
+	_sceneChange.sceneID = stream.readUint16LE();
+	_sceneChange.frameID = stream.readUint16LE();	// 0 in all 75 records
+	_sceneChange.continueSceneSound = kContinueSceneSound;
+	_sceneChange.listenerFrontVector.set(0, 0, 1);
+
+	if (_sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
+	readRolloverBlock(stream, _clickFlag, _clickSounds);
+
+	// 33 + 6 + 48 + block + 5 + block, exact on all 75 records.
+}
+
+void RolloverOverlay::init() {
+	g_nancy->_resource->loadImage(_imageName, _fullSurface);
+
+	// Like the terse overlay, the source rect supplies the top-left corner and
+	// the destination supplies the size; every AR 53 has them the same size
+	// anyway, so this only guards against a bad rect.
+	Common::Rect src(_destRect.width(), _destRect.height());
+	src.moveTo(_srcRect.left, _srcRect.top);
+	src.clip(Common::Rect(_fullSurface.w, _fullSurface.h));
+
+	_drawSurface.create(_fullSurface, src);
+	setTransparent(true);
+	moveTo(_destRect);
+	setVisible(false);
+
+	RenderObject::init();
+}
+
+void RolloverOverlay::handleInput(NancyInput &input) {
+	// Clicking is left to ActionManager's regular hotspot handling (which also
+	// checks the record's dependencies); this only tracks the hover.
+	const bool nowHovered = _hasHotspot &&
+		NancySceneState.getViewport().convertViewportToScreen(_hotspot).contains(input.mousePos);
+
+	if (nowHovered == _isHovered) {
+		return;
+	}
+
+	_isHovered = nowHovered;
+	setVisible(nowHovered);
+
+	if (_hoverFlag.label != kEvNoEvent) {
+		// The hover flag is what the paired records watch, so it has to go back
+		// down when the cursor leaves - otherwise a price tag's text would stay
+		// up for the rest of the scene. Several of these labels are in the
+		// persistent 1041+ range, which makes leaving them set worse still.
+		NancySceneState.setEventFlag(_hoverFlag.label,
+			nowHovered ? _hoverFlag.flag :
+				(_hoverFlag.flag == g_nancy->_true ? g_nancy->_false : g_nancy->_true));
+	}
+
+	if (nowHovered) {
+		_playingSound = playRolloverSounds(_hoverSounds);
+	}
+}
+
+void RolloverOverlay::execute() {
+	switch (_state) {
+	case kBegin:
+		init();
+		registerGraphics();
+		_hasHotspot = true;
+		_state = kRun;
+		// fall through
+	case kRun:
+		break;
+	case kActionTrigger:
+		_playingSound = playRolloverSounds(_clickSounds);
+		NancySceneState.setEventFlag(_clickFlag);
+
+		if (_sceneChange.sceneID != kNoScene) {
+			setVisible(false);
+			_isHovered = false;
+
+			if (_hoverFlag.label != kEvNoEvent) {
+				NancySceneState.setEventFlag(_hoverFlag.label,
+					_hoverFlag.flag == g_nancy->_true ? g_nancy->_false : g_nancy->_true);
+			}
+
+			NancySceneState.changeScene(_sceneChange);
+			finishExecution();
+			break;
+		}
+
+		// No scene change: the rollover has to keep working. Retiring it the
+		// way a one-shot hotspot normally would means the costume shop's price
+		// tag stops appearing the moment it is clicked once, and the four
+		// rollovers in S5210 that set no flag at all would be killed by a
+		// single stray click. What the click does (its flag) has already
+		// happened, and the records that watch that flag are one-shot
+		// themselves, so re-arming is safe.
+		_state = kRun;
+		break;
+	}
+}
+
+Common::String RolloverOverlay::getRecordExtraInfo() const {
+	return Common::String::format("%s, scene %d", _imageName.baseName().c_str(), _sceneChange.sceneID);
+}
+
+void OverlayStaticTinted::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _imageName);
+
+	_z = stream.readUint16LE();
+
+	const uint16 numTints = stream.readUint16LE();
+	_tints.resize(numTints);
+	for (uint i = 0; i < numTints; ++i) {
+		_tints[i].color = stream.readUint32LE();
+		_tints[i].flagLabel = stream.readSint16LE();
+	}
+
+	stream.skip(4);		// 1 in all 21 records
+
+	readRect(stream, _srcRect);
+	readRect(stream, _destRect);
+
+	// 33 + 2 + 2 + 6 * numTints + 4 + 32, exact on all 21 records.
+}
+
+int OverlayStaticTinted::pickTint() const {
+	for (uint i = 0; i < _tints.size(); ++i) {
+		if (_tints[i].flagLabel != kEvNoEvent &&
+				NancySceneState.getEventFlag(_tints[i].flagLabel, g_nancy->_true)) {
+			return (int)i;
+		}
+	}
+
+	return -1;
+}
+
+void OverlayStaticTinted::applyTint(int tintID) {
+	Common::Rect src(_destRect.width(), _destRect.height());
+	src.moveTo(_srcRect.left, _srcRect.top);
+	src.clip(Common::Rect(_fullSurface.w, _fullSurface.h));
+
+	if (src.isEmpty()) {
+		return;
+	}
+
+	// An owned copy, not a view into _fullSurface: the tint is destructive and
+	// the same image is shared by several records.
+	_drawSurface.free();
+	_drawSurface.create(src.width(), src.height(), _fullSurface.format);
+	_drawSurface.rawBlitFrom(_fullSurface, src, Common::Point());
+
+	if (tintID >= 0 && tintID < (int)_tints.size() && _drawSurface.format.bytesPerPixel == 4) {
+		const uint32 color = _tints[tintID].color;
+		const uint32 tintR = (color >> 24) & 0xff;
+		const uint32 tintG = (color >> 16) & 0xff;
+		const uint32 tintB = (color >> 8) & 0xff;
+		const uint32 transColor = g_nancy->_graphics->getTransColor();
+		const Graphics::PixelFormat &format = _drawSurface.format;
+
+		for (int y = 0; y < _drawSurface.h; ++y) {
+			uint32 *pixel = (uint32 *)_drawSurface.getBasePtr(0, y);
+			for (int x = 0; x < _drawSurface.w; ++x, ++pixel) {
+				if (*pixel == transColor) {
+					continue;
+				}
+
+				byte r, g, b, a;
+				format.colorToARGB(*pixel, a, r, g, b);
+				*pixel = format.ARGBToColor(a, (r * tintR) / 255, (g * tintG) / 255, (b * tintB) / 255);
+			}
+		}
+	}
+
+	setTransparent(true);
+	moveTo(_destRect);
+	_needsRedraw = true;
+	_currentTint = tintID;
+}
+
+void OverlayStaticTinted::init() {
+	g_nancy->_resource->loadImage(_imageName, _fullSurface);
+	applyTint(pickTint());
+	RenderObject::init();
+}
+
+void OverlayStaticTinted::execute() {
+	switch (_state) {
+	case kBegin:
+		init();
+		registerGraphics();
+		_state = kRun;
+		// fall through
+	case kRun:
+		break;
+	default:
+		finishExecution();
+		break;
+	}
+}
+
+void OverlayStaticTinted::updateGraphics() {
+	if (_state != kRun) {
+		return;
+	}
+
+	// Same rule as the static Overlay: a record gated on a dependency that can
+	// go back off must disappear with it.
+	setVisible(_isActive);
+
+	const int tint = pickTint();
+	if (tint != _currentTint) {
+		applyTint(tint);
+	}
 }
 
 void OverlayAnimTerse::readData(Common::SeekableReadStream &stream) {

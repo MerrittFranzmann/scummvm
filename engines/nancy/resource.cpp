@@ -23,6 +23,7 @@
 #include "common/config-manager.h"
 
 #include "image/bmp.h"
+#include "image/png.h"
 
 #include "engines/nancy/nancy.h"
 #include "engines/nancy/resource.h"
@@ -34,6 +35,18 @@
 static char treePrefix[] = "_tree_";
 
 namespace Nancy {
+
+// Peek for the PNG signature without disturbing the stream position.
+static bool isPNGStream(Common::SeekableReadStream &stream) {
+	static const byte kPNGSignature[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+
+	const int64 pos = stream.pos();
+	byte header[sizeof(kPNGSignature)];
+	const uint32 read = stream.read(header, sizeof(header));
+	stream.seek(pos);
+
+	return read == sizeof(header) && memcmp(header, kPNGSignature, sizeof(header)) == 0;
+}
 
 bool ResourceManager::loadImage(const Common::Path &name, Graphics::ManagedSurface &surf, const Common::String &treeName, Common::Rect *outSrc, Common::Rect *outDest) {
 	if (name.empty()) {
@@ -104,10 +117,15 @@ bool ResourceManager::loadImage(const Common::Path &name, Graphics::ManagedSurfa
 			// Tree name was provided, bypass SearchMan
 			Common::String upper = treeName;
 			upper.toUppercase();
+			// Nancy16's XSheets name cel trees that are not loaded ciftrees, so
+			// this lookup can legitimately miss. Falling through to the SearchMan
+			// path below finds the image anyway; dereferencing the miss does not.
 			const CifTree *tree = (const CifTree *)SearchMan.getArchive(treePrefix + upper);
 
-			stream = tree->createReadStreamForMember(Common::Path(name));
-			info = tree->getCifInfo(name);
+			if (tree) {
+				stream = tree->createReadStreamForMember(Common::Path(name));
+				info = tree->getCifInfo(name);
+			}
 		}
 
 		if (!stream) {
@@ -145,6 +163,52 @@ bool ResourceManager::loadImage(const Common::Path &name, Graphics::ManagedSurfa
 		warning("Resource '%s' is not an image", name.toString().c_str());
 		delete stream;
 		return false;
+	}
+
+	// Nancy16 switched the image payload from a raw bitmap to a PNG, so there is no
+	// depth field to honour; the decoder carries the format itself.
+	if (isPNGStream(*stream)) {
+		Image::PNGDecoder pngDec;
+		const bool decoded = pngDec.loadStream(*stream);
+		delete stream;
+
+		if (!decoded || !pngDec.getSurface()) {
+			warning("Failed to decode PNG image '%s'", name.toString().c_str());
+			return false;
+		}
+
+		// PNGDecoder hands back RGB24, byte-order RGBA32 or CLUT8, while the rest of
+		// the engine works in the 32-bit input format (BGRA on little-endian, which is
+		// what the transparency colour's shifts assume). ManagedSurface::copyFrom()
+		// drops the palette, so convert here instead of relying on it.
+		const Graphics::Surface &decodedSurf = *pngDec.getSurface();
+		const Graphics::PixelFormat &outputFormat = g_nancy->_graphics->getInputPixelFormat(32);
+
+		if (decodedSurf.format == outputFormat) {
+			surf.copyFrom(decodedSurf);
+		} else {
+			const Graphics::Palette &palette = pngDec.getPalette();
+			Graphics::Surface *converted = decodedSurf.convertTo(outputFormat, palette.data(), palette.size());
+			if (!converted) {
+				warning("Failed to convert PNG image '%s' to the engine's pixel format",
+					name.toString().c_str());
+				return false;
+			}
+
+			surf.copyFrom(*converted);
+			converted->free();
+			delete converted;
+		}
+
+		if (outSrc) {
+			*outSrc = info.src;
+		}
+
+		if (outDest) {
+			*outDest = info.dest;
+		}
+
+		return true;
 	}
 
 	if (info.depth != 16 && info.depth != 24 && info.depth != 32) {
@@ -208,6 +272,23 @@ IFF *ResourceManager::loadIFF(const Common::Path &name) {
 	}
 
 	return nullptr;
+}
+
+IFF *ResourceManager::loadIFFFromTree(const Common::String &treeName, const Common::Path &name) {
+	Common::String upper = treeName;
+	upper.toUppercase();
+
+	Common::Archive *tree = SearchMan.getArchive(treePrefix + upper);
+	if (!tree) {
+		return nullptr;
+	}
+
+	Common::SeekableReadStream *stream = tree->createReadStreamForMember(name);
+	if (!stream) {
+		return nullptr;
+	}
+
+	return new IFF(stream);
 }
 
 bool ResourceManager::readCifTree(const Common::String &name, const Common::String &ext, int priority) {

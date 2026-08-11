@@ -29,6 +29,7 @@
 #include "engines/nancy/sound.h"
 #include "engines/nancy/font.h"
 #include "engines/nancy/graphics.h"
+#include "engines/nancy/puzzledata.h"
 
 #include "engines/nancy/action/actionmanager.h"
 #include "engines/nancy/action/actionrecord.h"
@@ -46,6 +47,13 @@ ActionManager::~ActionManager() {
 
 void ActionManager::handleInput(NancyInput &input) {
 	bool setHoverCursor = false;
+
+	// First record that refused the click on a cursor dependency. Held rather
+	// than acted on immediately, so the "can't use that" sound is only played
+	// once the whole walk has failed to find a record that accepts the click.
+	// See the long note in the walk below.
+	ActionRecord *cantRecord = nullptr;
+
 	for (auto &rec : _records) {
 		if (rec->_isActive && !rec->_isDone) {
 			// First, loop through all records and handle special cases.
@@ -55,6 +63,36 @@ void ActionManager::handleInput(NancyInput &input) {
 		}
 	}
 
+	// Record order IS the click priority, lowest index first. Nancy16 is no
+	// exception, and a local "topmostWins" reversal for Nancy16+ used to live
+	// here on the strength of one scene read without its dependencies. It was
+	// wrong; see the measurement in parallel/hijack/HIJACK.md.
+	//
+	// Every rect in nancy18 that fully contains another (265 pairs, 1531 scenes)
+	// was scored against the three candidate readings. Counting only hotspots
+	// shadowed by a record that is live from the instant the scene loads:
+	//
+	//                                  index order   topmost   smallest-area
+	//   hotspot never clickable                  1        33               0
+	//   deliberate blocker never blocks          0       108             108
+	//
+	// The data is authored for index order, in two idioms that both need it:
+	// specific hotspots first with an unconditional catch-all last (S3800,
+	// S4407, S4720, S4722, S5212, S5810, S5830), and a conditional full-screen
+	// blocker first that overrides the specifics while its flag is up (the
+	// S5411-S5436 map screens, S3051's fax, S3250's mosaic).
+	//
+	// The sharpest consequence: S4722, S5212 and S5830 each hold five hotspots
+	// under 200px^2, one live at a time by player-table value, and those fifteen
+	// records are the ONLY writers of event flag 2502 in all 14143. Each sits
+	// behind a 639x353 record with no dependencies at a higher index, so walking
+	// topmost-first makes 2502 unreachable game-wide - and it has 25 readers,
+	// S5400's SetValue among them.
+	//
+	// The desk that the reversal was introduced for does not need it: in S6401
+	// the dictionary is AR17 gated on Inventory(13)==0 and the ticket is AR20
+	// gated on Inventory(13)==1, so the two are never live at the same instant
+	// and either order gives the same answer.
 	for (auto &rec : _records) {
 		if (	rec->_isActive &&
 				!rec->_isDone &&
@@ -69,20 +107,46 @@ void ActionManager::handleInput(NancyInput &input) {
 			}
 
 			if (input.input & NancyInput::kLeftMouseButtonUp) {
-				input.input &= ~NancyInput::kLeftMouseButtonUp;
-
 				rec->_cursorDependency = nullptr;
 				processDependency(rec->_dependencies, *rec, false);
 
 				if (!rec->_dependencies.satisfied) {
-					if (rec->_cursorDependency != nullptr) {
-						NancySceneState.playItemCantSound(
-							rec->_cursorDependency->label,
-							(g_nancy->getGameType() <= kGameTypeNancy2 && rec->_cursorDependency->condition == kCursInvNotHolding));
-					} else {
-						continue;
+					// A CURSOR dependency is the only way a record that is live
+					// can still refuse a click: a hotspot record is drawn with
+					// doNotCheckCursor set, so anything whose flags or inventory
+					// failed is not _isActive and never reaches this loop at all.
+					// So "unsatisfied here" means "wrong thing in hand", and the
+					// right answer is to offer the click to the NEXT record on the
+					// same point rather than to swallow it.
+					//
+					// MEASURED, S3803 (ZAT_SideEntXCU, the warehouse side entrance).
+					// Two type-28 records share the rect screen(125,76,514,392):
+					// AR3 needs an EMPTY hand and starts the get-caught chain, AR10
+					// needs item 23 held and opens the keypad cover. Index order
+					// reaches AR3 first; holding item 23 it fails its cursor test,
+					// and because the click was consumed above the walk could never
+					// reach AR10. Trace p10_gate: held=23, both records live, the
+					// click at 319,234 produced no state change and no scene change
+					// for the remaining 100 s. The side entrance was unreachable in
+					// every state - which is why this was on the list as a route gap.
+					//
+					// This is not the topmost-vs-index question and does not reopen
+					// it: the walk order is unchanged, and a record that accepts a
+					// click today still accepts it, because every record before it
+					// evaluates exactly as before. The only behaviour that changes
+					// is a click that is currently guaranteed to do nothing.
+					//
+					// The "can't" sound is still played - just deferred to after the
+					// walk, so it only fires when NOTHING on that point accepted the
+					// click, which is what it means.
+					if (rec->_cursorDependency != nullptr && cantRecord == nullptr) {
+						cantRecord = rec;
 					}
+
+					continue;
 				} else {
+					input.input &= ~NancyInput::kLeftMouseButtonUp;
+					cantRecord = nullptr;
 					rec->_state = ActionRecord::ExecutionState::kActionTrigger;
 
 					input.eatMouseInput();
@@ -91,7 +155,30 @@ void ActionManager::handleInput(NancyInput &input) {
 						int16 item = rec->_cursorDependency->label;
 
 						// Re-add the object to the inventory unless it's marked as a one-time use
-						if (item == NancySceneState.getHeldItem() && item != -1) {
+						if (item == NancySceneState.getHeldItem() && item != -1 &&
+								g_nancy->getGameType() >= kGameTypeNancy16) {
+							// Nancy16 replaced INV with INVD, and INVD carries a single
+							// keepItem BIT per item instead of INV's four-way enum. The
+							// GetEngineData(INV) below returns null here and the assert
+							// fires - which is why this whole branch had never run in
+							// nancy18 until a cursor-gated record could be satisfied at
+							// all (see the note above). Measured: S3803, step 4, "Assertion
+							// failed: (inventoryData), actionmanager.cpp:160".
+							const INVD *invd = (const INVD *)g_nancy->getEngineData("INVD");
+							bool keep = true;
+							if (invd) {
+								for (uint k = 0; k < invd->items.size(); ++k) {
+									if (invd->items[k].id == (uint16)item) {
+										keep = invd->items[k].keepItem();
+										break;
+									}
+								}
+							}
+
+							if (!keep) {
+								NancySceneState.setHeldItem(-1);
+							}
+						} else if (item == NancySceneState.getHeldItem() && item != -1) {
 							auto *inventoryData = GetEngineData(INV);
 							assert(inventoryData);
 
@@ -122,6 +209,18 @@ void ActionManager::handleInput(NancyInput &input) {
 			}
 		}
 	}
+
+	// Nothing on that point took the click, and at least one record refused it
+	// because of what was in hand. That - and only that - is what the "can't"
+	// sound means.
+	if (cantRecord != nullptr && cantRecord->_cursorDependency != nullptr &&
+			(input.input & NancyInput::kLeftMouseButtonUp)) {
+		input.input &= ~NancyInput::kLeftMouseButtonUp;
+		NancySceneState.playItemCantSound(
+			cantRecord->_cursorDependency->label,
+			(g_nancy->getGameType() <= kGameTypeNancy2 &&
+			 cantRecord->_cursorDependency->condition == kCursInvNotHolding));
+	}
 }
 
 void ActionManager::addNewActionRecord(Common::SeekableReadStream &inputData) {
@@ -136,6 +235,9 @@ void ActionManager::addNewActionRecord(Common::SeekableReadStream &inputData) {
 	_records.push_back(newRecord);
 }
 
+// Width of the Nancy16+ "EndOfDeps" field that terminates the dependency block
+static const uint kEndOfDepsSize = 32;
+
 ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &inputData) {
 	inputData.seek(0);
 	char descBuf[0x30];
@@ -143,6 +245,28 @@ ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &
 	descBuf[0x2F] = '\0';
 	byte ARType = inputData.readByte();
 	byte execType = inputData.readByte();
+
+	// Nancy16 moved the dependency block from the end of the record to the start,
+	// prefixed it with an explicit count and terminated it with an "EndOfDeps"
+	// string. Read past it here so readData() below starts at the payload; the
+	// dependencies themselves are parsed afterwards by the shared code, which
+	// needs the record to exist first.
+	int64 headDepsOffset = -1;
+	uint headNumDeps = 0;
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		headNumDeps = inputData.readUint32LE();
+		headDepsOffset = inputData.pos();
+		inputData.skip(headNumDeps * 16);
+
+		char sentinel[kEndOfDepsSize];
+		inputData.read(sentinel, kEndOfDepsSize);
+		sentinel[kEndOfDepsSize - 1] = '\0';
+		if (Common::String(sentinel) != "EndOfDeps") {
+			warning("Action record '%s' has %u dependencies but no EndOfDeps marker", descBuf, headNumDeps);
+			return nullptr;
+		}
+	}
+
 	ActionRecord *newRecord = createActionRecord(ARType, &inputData);
 
 	if (!newRecord) {
@@ -155,13 +279,42 @@ ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &
 
 	newRecord->readData(inputData);
 
+	// A record whose class does not match this game's numbering reads past the
+	// end of its own chunk. That used to walk off the buffer and crash inside
+	// readRect; catching it here turns a mis-mapped type into one warning and a
+	// skipped record, which is survivable and much easier to diagnose.
+	if (inputData.eos() || inputData.pos() > inputData.size()) {
+		warning("AUDIT overread type %u as %s", ARType, newRecord->getRecordTypeName().c_str());
+		warning("Action record '%s' (type %u) read past the end of its chunk as %s; skipping it",
+			descBuf, ARType, newRecord->getRecordTypeName().c_str());
+		delete newRecord;
+		return nullptr;
+	}
+
+	if (headDepsOffset >= 0 && inputData.pos() != inputData.size()) {
+		warning("AUDIT underread type %u as %s: %d of %d bytes",
+			ARType, newRecord->getRecordTypeName().c_str(),
+			(int)inputData.pos(), (int)inputData.size());
+	}
+
 	// If the remaining data is less than the total data, there must be dependencies at the end of the chunk
 	int64 dataRemaining = inputData.size() - inputData.pos();
-	if (dataRemaining > 0 && newRecord->getRecordTypeName() != "Unimplemented") {
-		// Each dependency is 12 (up to nancy2) or 16 (nancy3 and up) bytes long
-		uint singleDepSize = g_nancy->getGameType() <= kGameTypeNancy2 ? 12 : 16;
-		uint numDependencies = dataRemaining / singleDepSize;
-		if (dataRemaining % singleDepSize) {
+	uint singleDepSize = g_nancy->getGameType() <= kGameTypeNancy2 ? 12 : 16;
+	uint numDependencies = 0;
+	bool haveDeps = false;
+
+	if (headDepsOffset >= 0) {
+		// Nancy16+: rewind to the block we skipped above
+		inputData.seek(headDepsOffset);
+		numDependencies = headNumDeps;
+		haveDeps = true;
+	} else if (dataRemaining > 0 && newRecord->getRecordTypeName() != "Unimplemented") {
+		numDependencies = dataRemaining / singleDepSize;
+		haveDeps = true;
+	}
+
+	if (haveDeps) {
+		if (headDepsOffset < 0 && dataRemaining % singleDepSize) {
 			warning("Action record type %u, %s has incorrect read size!\ndescription:\n%s",
 				newRecord->_type,
 				newRecord->getRecordTypeName().c_str(),
@@ -268,7 +421,120 @@ void ActionManager::processActionRecords() {
 	}
 
 	synchronizeMovieWithSound();
-	debugDrawHotspots();
+
+	// The hotspot overlay is a single shared RenderObject. A concurrent Nancy16
+	// stream has no hotspots and would only wipe the main flow's boxes off it.
+	if (!NancySceneState.getStreams().executing()) {
+		debugDrawHotspots();
+	}
+}
+
+// Nancy16 reuses dependency type 13 for a player-table value comparison:
+// label is a table value index, condition is the operator, and the time fields
+// carry the number compared against. Three things pin this down for the Dance
+// Audition (S2670-72, S2770-72): the scene's SetValue record seeds value 38
+// with 50, the DANCEPUZZLE NDUI binds its "DanceMeter" widget to Engine_Index
+// 38 with range 0..100, and the scene's SceneChange records split on 38 vs
+// 30/50. S2775 then gives the operators away by banding the same value into
+// [50,60) [60,70) [70,80) [80,90) [90,-) with alternating conditions 2 and 3.
+//
+// Labels at or above kNumTimers cannot name a software-timer slot at all, so
+// they are always the table reading. Labels below it are ambiguous on their
+// face - but in this game they are overwhelmingly table indices too, and the
+// money system is one of them:
+//
+//   * S1, the difficulty screen, runs SetValue(index 5, set, 200). That is the
+//     200 euros the player starts with.
+//   * Every shop then spends it with SetValue(index 5, add, -N) - the kiosk
+//     magazines at -5, the costume shop's dress at -60, wig -40, gloves -5 -
+//     and gates the purchase on a type-13 dependency with label 5.
+//   * S5211 shows both halves side by side: the same magazine hotspot appears
+//     twice, once under TimerLT(5, condition 2, 5) which buys it, and once
+//     under TimerLT(5, condition 3, 5) whose only action is Nancy saying she
+//     cannot afford it. Those are ">= 5" and "< 5" on the purse.
+//
+// Measured over the whole game: 37 scenes carry a type-13/14 dependency whose
+// label is below kNumTimers. In 29 of them the same scene also writes that
+// exact index with a SetValue record; in none of them does the same scene start
+// that timer slot with AR 104. Read as timer slots these 351 dependencies are
+// all permanently false, which silently disables the kiosk, the costume shop,
+// the Rialto vendors, the gondolier fares and the microscope's exit.
+//
+// The rule below still gives a running timer priority, so no dependency that is
+// satisfiable today changes meaning: an inactive slot's timer reading is
+// unconditionally false, and comparePlayerTableValue is likewise false when the
+// table holds no value at that index. It can only turn never-true into correct.
+static bool isPlayerTableCompare(const DependencyRecord &dep) {
+	if (g_nancy->getGameType() < kGameTypeNancy16) {
+		return false;
+	}
+
+	if (dep.label >= (int16)TimerData::kNumTimers) {
+		return true;
+	}
+
+	return !NancySceneState.isSoftwareTimerActive(dep.label);
+}
+
+bool comparePlayerTableValue(const DependencyRecord &dep) {
+	TableData *playerTable = (TableData *)NancySceneState.getPuzzleData(TableData::getTag());
+	if (!playerTable) {
+		return false;
+	}
+
+	const int16 value = playerTable->getValue(dep.label);
+	if (value == kNoTableValue) {
+		return false;
+	}
+
+	// The `hours` field selects what the value is compared against: 0 means the
+	// literal the time fields carry, 1 means the value held at the table index
+	// they name. Only four dependencies in the whole game set it to 1, and all
+	// four are the single scene-change record that opens the flooded vault's
+	// hatch in S6700: (30 vs 31), (31 vs 32), (32 vs 33), (33 vs 34) - the five
+	// pressure gauges the scene's five wheels drive, chained pairwise into "all
+	// five are equal". The sign on the vault wall states the rule outright:
+	// "il portello bloccherà se la pressione dell'acqua non è uguale".
+	//
+	// Folding hours into timeData the way the literal reading does gives
+	// ((1*60)*60)*1000 + 31 = 3600031, which truncates to -4449 as an int16 and
+	// can never equal a gauge reading of 1-10. The hatch could therefore never
+	// open however the wheels were set, which is the other half of "the rotate
+	// buttons do nothing".
+	int16 against;
+	if (dep.hours == 1) {
+		against = playerTable->getValue((uint16)dep.milliseconds);
+		if (against == kNoTableValue) {
+			return false;
+		}
+	} else {
+		against = (int16)(uint32)dep.timeData;
+	}
+
+	switch (dep.condition) {
+	case 0:
+		return value == against;
+	case 1:
+		return value > against;
+	case 2:
+		return value >= against;
+	case 3:
+		return value < against;
+	case 4:
+		return value <= against;
+	case 5:
+		// The sixth operator, "!=". Nancy16 uses it 12 times, always on player
+		// table index 4 - the location register that S1/S2605 set to 1 (MIC),
+		// S4420 to 2 (CAS), S5207/S5235 to 3 (KIO) and S4713/S4716/S4721/S4723
+		// to 4 (COS) - and always as the exact complement of a cond-0 "== this
+		// site" test in the same scene. Falling into `default: return false`
+		// deleted the "you are NOT at this site, behave normally" half of four
+		// scenes, and in S2600 (Campo San Polo) that is every exit the scene
+		// has, including the only door to the dance club.
+		return value != against;
+	default:
+		return false;
+	}
 }
 
 void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &record, bool doNotCheckCursor) {
@@ -367,7 +633,10 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 			break;
 		case DependencyType::kElapsedSceneTime:
-			if (NancySceneState._timers.sceneTime >= dep.timeData) {
+			// Inside a Nancy16 stream this is the stream's own clock, not the
+			// player's - s3199's key-jiggling beats are timed against the stream
+			// it runs in, which starts long after the scene the player is on.
+			if (NancySceneState.getFlowSceneTime() >= dep.timeData) {
 				dep.satisfied = true;
 			} else {
 				dep.satisfied = false;
@@ -397,6 +666,15 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 			// Note: nancy7 completely flipped the meaning of 1 and 2
 			int count = NancySceneState.getSceneCounts(dep.hours);
 			switch (dep.milliseconds) {
+			case 0:
+				// Nancy16 leaves the comparison selector at 0 on 15 of its 25
+				// scene-count dependencies, which fell through this switch and
+				// left `satisfied` at whatever it happened to be - so records
+				// gated this way never ran. Equality is the reading that fits:
+				// Nancy's opening narration is gated on visit 1 of the desk and
+				// is meant to play once.
+				dep.satisfied = (dep.minutes == count);
+				break;
 			case 1:
 				if (	(dep.minutes < count && g_nancy->getGameType() <= kGameTypeNancy6) ||
 						(dep.minutes > count && g_nancy->getGameType() >= kGameTypeNancy7)) {
@@ -416,12 +694,33 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 				break;
 			case 3:
-				if (dep.minutes == count) {
-					dep.satisfied = true;
-				} else {
-					dep.satisfied = false;
-				}
-
+				// Selector 3 is used EXACTLY ONCE in nancy18 - S6718 record 3,
+				// the drowning handler in the flooded water vault - and it is
+				// the other half of a complementary pair with a selector-2
+				// record on the same counted scene (6717) and the same
+				// threshold (3):
+				//
+				//   idx 3  sel 3  thr 3  -> S6717   (go round again)
+				//   idx 4  sel 2  thr 3  -> S6621   (give up on the vault)
+				//
+				// Selector 2 on Nancy7+ is "count > threshold", so 3 has to be
+				// its complement, and it must be "count <= threshold" rather
+				// than "count < threshold": with `<` the value count == 3 would
+				// satisfy neither record and S6718 would have no live exit at
+				// all. Reading it as equality (which is what this case did, a
+				// straight duplicate of case 0) leaves BOTH halves false on the
+				// first drowning - count arrives at 0 - so the player drowned
+				// once and then sat in S6718 forever.
+				//
+				// Honest limit: with a single use in the corpus there is no
+				// second instance to cross-check against. The evidence is the
+				// complementary pairing, the fact that case 0 already covers
+				// equality, and that this is the only reading that leaves the
+				// scene a live exit for every possible count.
+				dep.satisfied = (count <= dep.minutes);
+				break;
+			default:
+				dep.satisfied = false;
 				break;
 			}
 
@@ -525,7 +824,9 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 			break;
 		case DependencyType::kTimerLessThanDependencyTime:
-			if (g_nancy->getGameType() >= kGameTypeNancy11) {
+			if (isPlayerTableCompare(dep)) {
+				dep.satisfied = comparePlayerTableValue(dep);
+			} else if (g_nancy->getGameType() >= kGameTypeNancy11) {
 				// Nancy11+ checks a software-timer slot (label = slot index)
 				dep.satisfied = NancySceneState.isSoftwareTimerActive(dep.label) &&
 					NancySceneState.getSoftwareTimerElapsed(dep.label) <= (uint32)dep.timeData;
@@ -535,7 +836,9 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 			break;
 		case DependencyType::kTimerGreaterThanDependencyTime:
-			if (g_nancy->getGameType() >= kGameTypeNancy11) {
+			if (isPlayerTableCompare(dep)) {
+				dep.satisfied = comparePlayerTableValue(dep);
+			} else if (g_nancy->getGameType() >= kGameTypeNancy11) {
 				dep.satisfied = NancySceneState.isSoftwareTimerActive(dep.label) &&
 					(uint32)dep.timeData < NancySceneState.getSoftwareTimerElapsed(dep.label);
 			} else {
@@ -548,6 +851,47 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 			dep.satisfied = NancySceneState.isSoftwareTimerActive(dep.label);
 
 			break;
+		case DependencyType::kSoftwareTimerElapsed: {
+			// Nancy16's software-timer compare. Type 13 became a value compare in
+			// this game (see isPlayerTableCompare above) and the timer test moved
+			// here. What pins it down: the label is only ever 4, 5 or 9, which is
+			// exactly the set of timer slots that AR 104 starts but never gives a
+			// duration to - every other slot fires its own event flags instead and
+			// is never named by one of these. The times form a millisecond ladder
+			// (0.8s, 0.9s, 1.2s ... 12.1s) driving a cue sequence, and in each
+			// scene that uses one the largest time belongs to the AR 104 record
+			// that clears the slot again: S4460 sets flags at 3s/4s/5s/6s and
+			// clears slot 9 at 6.5s.
+			const bool active = NancySceneState.isSoftwareTimerActive(dep.label);
+			const uint32 elapsed = NancySceneState.getSoftwareTimerElapsed(dep.label);
+			const uint32 against = (uint32)dep.timeData;
+
+			// GUESS: only condition 1 occurs, in all 100 dependencies of this type,
+			// and it has to mean "the slot has been running this long" for the cue
+			// ladders to play in order. The other conditions are mirrored from the
+			// Nancy16 value-compare table (0 ==, 1 >, 2 >=, 3 <, 4 <=) rather than
+			// measured, since the game never uses them.
+			switch (dep.condition) {
+			case 0:
+				dep.satisfied = active && elapsed == against;
+				break;
+			case 2:
+				dep.satisfied = active && elapsed >= against;
+				break;
+			case 3:
+				dep.satisfied = active && elapsed < against;
+				break;
+			case 4:
+				dep.satisfied = active && elapsed <= against;
+				break;
+			case 1:
+			default:
+				dep.satisfied = active && elapsed > against;
+				break;
+			}
+
+			break;
+		}
 		case DependencyType::kDifficultyLevel:
 			if (dep.condition == NancySceneState.getDifficulty()) {
 				dep.satisfied = true;

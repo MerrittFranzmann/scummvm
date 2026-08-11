@@ -77,6 +77,19 @@ public:
 		// pick. A roll inside [0, stayWeight) means "don't transition";
 		// instead pause for [minPauseMs, maxPauseMs] and re-roll.
 		uint16 stayWeight = 0;
+		// The event flag this sequence raises when it starts playing. -1 in 238
+		// of the game's 240 sequence blocks; 2650 in the other two, both on the
+		// STARTING sequence "off_c1root_anim" of the records in S2066 and S2072.
+		// EVNT names 2650 EV_Fango_InRoot - "Fango is in his root animation" -
+		// which is exactly what a flag raised by the sequence named
+		// "off_c1root_anim" would mean, and is not a reading any other field
+		// position supports.
+		//
+		// It matters because 2650 is the sole event-flag gate on the only
+		// transition out of S2066 (to S2036), and S2036 holds the only record in
+		// the game that sets 2473 = EV_Saw_Fango_Pigeon, which is what opens the
+		// Venice map. Skipping this field left the game unwinnable from S2066.
+		int16 raiseFlag = kEvNoEvent;
 		Common::Array<NextSequenceRef> nextSequences;
 	};
 
@@ -129,6 +142,11 @@ public:
 
 	MoviePlayer _decoder;
 
+	// Harness only (nancy_movie_skip / nancy_trace). Inert with neither set.
+	uint32 _traceStartMs = 0;
+	bool _traceSkipped = false;
+	bool _traceReported = false;
+
 	// Random-movie state (only populated when _isRandom).
 	bool _isRandom = false;
 	// "RandomMovie" picks any sequence; otherwise it names the starting one.
@@ -155,6 +173,9 @@ public:
 	RandomChainState _randomChainState = kRandomPlaying;
 	uint32 _randomPauseEndTime = 0;
 	bool _randomStopRequested = false;
+	// Nancy16 only: set when a pause has just run out, so the next roll skips
+	// straight to picking a successor instead of possibly pausing again.
+	bool _randomPauseExpired = false;
 
 	// Talkable-character hover state: whether the mouse is over the character,
 	// and whether the recognition (secondary) movie is currently playing.
@@ -193,6 +214,11 @@ protected:
 	// blt-descriptor lists separated by the recognition movie's name, in place
 	// of Nancy13's secondaryMovie record + hotspot list.
 	void readRandomMovieDataNancy14(Common::Serializer &ser, Common::SeekableReadStream &stream);
+	// Nancy16 (ARs 42 and 43, one layout for both) trimmed the Nancy14 header
+	// back down and put a label string in front of it; the sequence records
+	// gained one leading int16 each, and the tail is a single blt-descriptor
+	// list with no recognition movie.
+	void readRandomMovieDataNancy16(Common::Serializer &ser, Common::SeekableReadStream &stream);
 	void readRandomSequence(Common::Serializer &ser, RandomSequence &seq);
 	void readSecondaryRandomMovie(Common::Serializer &ser, RandomSequence &seq);
 
@@ -205,6 +231,8 @@ protected:
 	// Apply a RandomSequence's playback config to the PSM flat fields
 	// and reload the decoder. Returns true on success.
 	bool activateRandomSequence(int index);
+	// Raise the event flag a random sequence carries, if it names one.
+	void raiseSequenceFlag(int index);
 
 	// Load & start the recognition (secondary) movie in place of the idle loop.
 	bool activateSecondaryMovie();
@@ -221,6 +249,10 @@ protected:
 	// Enter the paused chain state for a random duration in the sequence's
 	// [minPauseMs, maxPauseMs] range. Always returns -1.
 	int beginRandomPause(const RandomSequence &seq);
+
+	// The weighted pick among a sequence's successors on its own, without the
+	// preceding "stay here" roll. Returns -1 when there are none.
+	int pickSuccessorSequence(const RandomSequence &seq);
 
 	// Find a sequence by name, warning and returning -1 if it isn't present.
 	int lookupSequence(const Common::Path &name) const;

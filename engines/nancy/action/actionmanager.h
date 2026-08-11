@@ -44,6 +44,12 @@ namespace Action {
 class ActionRecord;
 struct DependencyRecord;
 
+// Evaluates one type-13/14 player-table dependency. This is the engine's own
+// gate, exported so a debug autoplay hook can ask "is this record's condition
+// met?" with the same code the dependency evaluator runs rather than a second
+// copy of the operator table that could drift from it.
+bool comparePlayerTableValue(const DependencyRecord &dep);
+
 // The class that handles ActionRecords and their execution
 class ActionManager {
 public:

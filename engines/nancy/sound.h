@@ -130,6 +130,12 @@ public:
 	Math::Vector3d &getOrientation() { return _orientation; }
 	Common::String getChannelInfo(uint16 channelID);
 
+	// "6:AMB_Venice*,14:CAS_Door" - every channel the mixer is actually
+	// playing, with the sound on it, starred when it is owned by an ambient
+	// environment stream. For the debug state fingerprint: "the stream is
+	// running" and "you can hear it" are different claims.
+	Common::String describeActiveChannels() const;
+
 	// Used when changing scenes
 	void stopAndUnloadSceneSpecificSounds();
 	void pauseSceneSpecificSounds(bool pause);
@@ -150,6 +156,14 @@ protected:
 		Audio::AudioStream *streamForMixer = nullptr;
 		Audio::SoundHandle handle;
 		bool isPersistent = false;
+
+		// Started by a Nancy16 ambient environment stream (see streams.h). Such
+		// a channel is not scene-specific however low its number is: the ENVS
+		// beds sit on 6/10/21, well inside the 0-13 range
+		// stopAndUnloadSceneSpecificSounds() clears, and their records are
+		// one-shot, so being stopped once is being stopped for good. Only
+		// StreamManager::end() and a later claim on the channel silence them.
+		bool isAmbient = false;
 
 		// Sound effect data, not applicable to nancy2 and below
 		SoundEffectDescription *effectData = nullptr;

@@ -140,6 +140,22 @@ struct SortPuzzleData : public PuzzleData {
 	Common::Array<int16> solvedState;
 };
 
+// Running match score for the Nancy16 Scopa game (AR 211, S4450). Scopa is
+// played over as many hands as it takes to reach the target, and the record
+// gets there by setting an event flag that makes another record in the same
+// scene reload S4450 - so the score has to outlive the scene. The record names
+// its store "ScopaSave", which is also what the scene's "Clear Saved Data"
+// record (AR 108) names as the thing it wipes when the match is over.
+struct ScopaPuzzleData : public PuzzleData {
+	ScopaPuzzleData() {}
+	virtual ~ScopaPuzzleData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('S', 'C', 'P', 'A'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	int16 score[2] = { 0, 0 };
+};
+
 // Per-magnet (left, top, right, bottom, locked) packed as 5 int16s. The
 // puzzle's two scenes (3280, 3281) are the same puzzle with the same data,
 // so a single flat array suffices.
@@ -163,6 +179,36 @@ struct GridMapPuzzleData : public PuzzleData {
 	virtual void synchronize(Common::Serializer &ser);
 
 	Common::Array<int16> itemState;
+};
+
+// The doorway hand-off between the nine rooms of the Nancy16 robot sentry maze.
+// An AR type 168 record in the room being left names the room being entered and
+// the cell to arrive on; the type 210 record in that room picks the pair up when
+// it starts. Empty pendingLevel means "no hand-off pending".
+struct SentryPuzzleData : public PuzzleData {
+	SentryPuzzleData() {}
+	virtual ~SentryPuzzleData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('S', 'N', 'T', 'R'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	Common::String pendingLevel;
+	int16 pendingCol = 0;
+	int16 pendingRow = 0;
+
+	// Autoplay only (nancy_sentry_autoplay), indexed by room number - 71: how
+	// many times each of the nine maze rooms has been entered, and whether the
+	// room's one objective (keypad or sapphire) has already been walked into
+	// once. Deliberately left out of synchronize() - a debug affordance must not
+	// change the save format, and a half-explored maze is not worth carrying
+	// across a load.
+	uint16 autoVisits[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+	byte autoTriedObjective[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+	// Autoplay only: the room Nancy is in and the one before it, so the explorer
+	// can decline to turn straight round in the doorway it just came through.
+	int16 autoRoom = -1;
+	int16 autoPrevRoom = -1;
 };
 
 struct QuizPuzzleData : public PuzzleData {
@@ -397,6 +443,38 @@ struct DrivingData : public PuzzleData {
 	double heading = 0.0;
 	int32 tireDamage = 0;
 	bool flatTire = false;
+};
+
+// Nancy16 "collections" (ARs 37/38/39). A collection is a named, ordered list of
+// values that a puzzle fills in one entry at a time: the digits typed into the
+// Zattere and Venice keypads, the buttons pressed on the Chinese puzzle box, the
+// number dialled on the fax machine. AR 37 declares one, AR 38 appends to it and
+// AR 39 tests it.
+//
+// They live here rather than in the scene's scratch flags because they have to
+// outlive a scene change: FaxNumberEntries is created in S2959, kept while the
+// player walks away, and destroyed from S3000 and S3805, which are different
+// scenes entirely.
+struct CollectionData : public PuzzleData {
+	struct Collection {
+		// Declared by the AR 37 creation record; see CollectionCreate.
+		uint32 maxEntries = 0;
+		bool isCharacter = false;
+
+		// Only the entries matching `isCharacter` are ever populated.
+		Common::Array<Common::String> strings;
+		Common::Array<double> numbers;
+
+		uint size() const { return isCharacter ? strings.size() : numbers.size(); }
+	};
+
+	CollectionData() {}
+	virtual ~CollectionData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('C', 'O', 'L', 'L'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	Common::HashMap<Common::String, Collection> collections;
 };
 
 PuzzleData *makePuzzleData(const uint32 tag);

@@ -251,6 +251,54 @@ protected:
 	int16 _lastIndexVal = -1;
 };
 
+// Nancy16 type 143, "Concat Sound" - a playlist of speech clips played back to
+// back. This is Nancy's opening narration (TUT_62, TUT_63a, TUT_63b, ...).
+//
+// The clips are stored in groups rather than as one flat list, which is why a
+// fixed stride only fit 28 of the 30 records. Layout, exact on 30/30:
+//   uint16   total number of clips in the record
+//   uint16   number of clips in the first group
+//   then, until every clip has been read:
+//     groupSize x: char[33] clip name, then 3 bytes (a byte 1 and a uint16 0)
+//     uint16   unknown, 1 throughout
+//     int16    event flag label, -1 when there is none
+//     uint16   unknown, 1 throughout
+//     uint16   size of the NEXT group; on the final group this slot instead
+//              holds the sound channel to play the whole playlist on
+//   uint32   loop count
+//   uint16   volume
+//   uint16   scene to change to afterwards, 32767 for none
+//   byte     unknown
+//
+// So the group trailer doubles as the link to the following group, and the
+// reader knows it is on the last group when the clip total has been reached.
+//
+// Each clip's subtitle comes from the CONVO string table, keyed by clip name -
+// the same lookup the conversation records use.
+class ConcatSound : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "ConcatSound"; }
+
+	Common::Array<Common::String> _clipNames;
+	// Event flag raised when the clip at the same index has finished playing.
+	// The data carries one flag per clip GROUP, in the group trailer; readData
+	// attaches it to the group's last clip.  kEvNoEvent on 104 of the game's
+	// 127 groups.  See ORPHAN.md 6.2: four story flags in nancy18 have no other
+	// source anywhere in the game, and EV_Sausage_Sick / EV_Eavesdrop /
+	// EV_Overheard_Squabbling / EV_Said_Safe_Secure gate 17 records between them.
+	Common::Array<FlagDescription> _clipEndFlags;
+	uint _current = 0;
+	bool _started = false;
+	SoundDescription _sound;
+	// Where to go when the last clip finishes; sceneID is kNoScene when the
+	// record just plays and stays put, which is 26 of the 30 records.
+	SceneChangeDescription _sceneChange;
+};
+
 } // End of namespace Action
 } // End of namespace Nancy
 

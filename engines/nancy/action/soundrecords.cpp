@@ -30,6 +30,7 @@
 #include "engines/nancy/action/soundrecords.h"
 
 #include "engines/nancy/state/scene.h"
+#include "engines/nancy/nduipanel.h"
 
 namespace Nancy {
 namespace Action {
@@ -75,6 +76,14 @@ static Common::String resolveSoundSubtitle(const Common::String &soundName) {
 
 void SetVolume::readData(Common::SeekableReadStream &stream) {
 	channel = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Constant 6 bytes in nancy18, all 183 records: the volume widened to 32
+		// bits, matching the fade record next door.
+		volume = (byte)stream.readUint32LE();
+		return;
+	}
+
 	volume = stream.readByte();
 }
 
@@ -85,6 +94,14 @@ void SetVolume::execute() {
 
 void FadeSoundToSilence::readData(Common::SeekableReadStream &stream) {
 	channel = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Constant 6 bytes in nancy18, all 59 records: channel then the fade
+		// time, with no padding between them.
+		fadeTimeMs = stream.readUint32LE();
+		return;
+	}
+
 	stream.skip(2); // pad / flag
 	fadeTimeMs = stream.readUint32LE();
 }
@@ -197,6 +214,13 @@ void PlaySound::readDataNancy13(Common::SeekableReadStream &stream) {
 	// scene ID (frame/vertical offset stay 0).
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
+
+	// Nancy16 uses 0x7fff as "no scene change"; ScummVM's kNoScene is 9999, so
+	// without this the sentinel is taken as a real destination and the engine
+	// tries to open a member called S32767.
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
 	_afterSoundAction = stream.readByte();	// overlay-refresh control; unused
 
 	// The single event flag became a list of { label, value } pairs.
@@ -334,6 +358,13 @@ void PlaySoundTerse::readData(Common::SeekableReadStream &stream) {
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
 
+	// Nancy16 uses 0x7fff as "no scene change"; ScummVM's kNoScene is 9999, so
+	// without this the sentinel is taken as a real destination and the engine
+	// tries to open a member called S32767.
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
 	_sceneChange.continueSceneSound = kContinueSceneSound;
 	_soundEffect = new SoundEffectDescription;
 
@@ -344,6 +375,13 @@ void PlaySoundEventFlagTerse::readData(Common::SeekableReadStream &stream) {
 	_sound.readTerse(stream);
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
+
+	// Nancy16 uses 0x7fff as "no scene change"; ScummVM's kNoScene is 9999, so
+	// without this the sentinel is taken as a real destination and the engine
+	// tries to open a member called S32767.
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
 	_flag.label = stream.readUint16LE();
 	_flag.flag = stream.readByte();
 
@@ -427,6 +465,26 @@ void PlaySoundMultiHS::execute() {
 
 void StopSound::readData(Common::SeekableReadStream &stream) {
 	_channelID = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// A constant 10-byte record in nancy18, all 115 of them. The scene
+		// descriptor here is 8 bytes rather than the 6 that type 16 uses, and its
+		// last three fields never vary: frameID 0, verticalOffset -1, and a
+		// trailing 0. The sceneID is a real scene or the sentinel in 115/115.
+		_sceneChange._sceneChange.sceneID = stream.readUint16LE();
+		_sceneChange._sceneChange.frameID = stream.readUint16LE();
+		_sceneChange._sceneChange.verticalOffset = stream.readUint16LE();
+		stream.skip(2);
+
+		_sceneChange._sceneChange.continueSceneSound = kContinueSceneSound;
+
+		if (_sceneChange._sceneChange.sceneID == kNancy16NoScene) {
+			_sceneChange._sceneChange.sceneID = kNoScene;
+		}
+
+		return;
+	}
+
 	_sceneChange.readData(stream);
 }
 
@@ -486,6 +544,138 @@ void TableIndexPlaySound::execute() {
 	}
 
 	PlaySoundCC::execute();
+}
+
+void ConcatSound::readData(Common::SeekableReadStream &stream) {
+	const uint16 numClips = stream.readUint16LE();
+	uint16 groupSize = stream.readUint16LE();
+
+	uint numRead = 0;
+	while (numRead < numClips) {
+		if (groupSize == 0 || numRead + groupSize > numClips) {
+			warning("ConcatSound group of %u clips overruns its %u-clip total", groupSize, numClips);
+			return;
+		}
+
+		for (uint i = 0; i < groupSize; ++i) {
+			Common::String name;
+			readFilename(stream, name);
+			stream.skip(3);
+
+			if (!name.empty()) {
+				_clipNames.push_back(name);
+				_clipEndFlags.push_back(FlagDescription());
+			}
+		}
+
+		numRead += groupSize;
+
+		stream.skip(2);
+
+		// The group's event flag, raised once its last clip has played. It is
+		// kEvNoEvent (0xffff) on 104 of this game's 127 groups; on the other 23
+		// it is a real label, and for four story flags this record is the only
+		// thing in the entire game that names them.
+		const int16 groupFlag = stream.readSint16LE();
+		if (groupFlag > kEvNoEvent && !_clipEndFlags.empty()) {
+			_clipEndFlags.back().label = groupFlag;
+			_clipEndFlags.back().flag = g_nancy->_true;
+		}
+
+		stream.skip(2);
+
+		// On every group but the last this is the next group's size; on the
+		// last one the same slot carries a channel number (24 or 25 in this
+		// game). Those are sfx channels in the layout the engine assumes, so
+		// keep playing narration on the speech channel rather than trusting a
+		// number whose channel table has not been confirmed for Nancy16.
+		const uint16 link = stream.readUint16LE();
+		if (numRead < numClips) {
+			groupSize = link;
+		}
+	}
+
+	_sound.channelID = 13;
+	_sound.numLoops = (uint16)stream.readUint32LE();
+	_sound.volume = stream.readUint16LE();
+
+	// Scene to change to once every clip has played; 32767 for none. Four of
+	// this game's thirty records use it, and those four are the only way into
+	// S6501, S6508 and S6510 - the closing sequence after the villain's arrest.
+	// Discarding it stalled the endgame permanently on S6500 (VEN_CloseA).
+	// Two bytes, not a full SceneChangeDescription: Nancy16's descriptor is 6.
+	_sceneChange.sceneID = stream.readUint16LE();
+	if (_sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+	_sceneChange.continueSceneSound = kContinueSceneSound;
+	stream.skip(1);
+}
+
+void ConcatSound::execute() {
+	if (_current >= _clipNames.size()) {
+		if (NDUIPanel *convo = NancySceneState.getConversationPanel()) {
+			convo->convoClose();
+		}
+
+		NancySceneState.changeScene(_sceneChange);
+		_isDone = true;
+		return;
+	}
+
+	if (!_started) {
+		_started = true;
+		_sound.name = _clipNames[_current];
+		g_nancy->_sound->loadSound(_sound);
+		g_nancy->_sound->playSound(_sound);
+
+		// Subtitle the clip, keyed by its name in the CONVO table.
+		if (ConfMan.getBool("subtitles")) {
+			// Narration subtitles are in AUTOTEXT rather than CONVO - the
+			// conversation table holds only character dialogue.
+			Common::String line;
+			for (const char *table : { "AUTOTEXT", "CONVO" }) {
+				auto *cvtx = (const CVTX *)g_nancy->getEngineData(table);
+				if (cvtx && cvtx->texts.contains(_sound.name)) {
+					line = cvtx->texts[_sound.name];
+					break;
+				}
+			}
+
+			// ConcatSound is Nancy's narration, not a conversation, so the line
+			// belongs in the centred VO caption rather than the framed dialogue
+			// box. Routing it to the conversation panel made the box pop up
+			// whenever she talked to herself, and drew it over the scene.
+			if (!line.empty()) {
+				if (NDUIPanel *narration = NancySceneState.getNarrationPanel()) {
+					narration->narrationSetCaption(line);
+				} else if (NDUIPanel *convo = NancySceneState.getConversationPanel()) {
+					// No CCText control in this game's LOWERMATTE: fall back to
+					// the old behaviour rather than losing the subtitle.
+					convo->convoOpen();
+					convo->convoSetCaption(line);
+				}
+			}
+		}
+
+		return;
+	}
+
+	if (!g_nancy->_sound->isSoundPlaying(_sound)) {
+		g_nancy->_sound->stopSound(_sound);
+
+		// Raise the group's event flag, if this clip ends one that has one
+		if (_current < _clipEndFlags.size() &&
+				_clipEndFlags[_current].label > kEvNoEvent) {
+			debugC(1, kDebugActionRecord, "ConcatSound: clip \"%s\" raises flag %d (%s)",
+				_clipNames[_current].c_str(), _clipEndFlags[_current].label,
+				g_nancy->getEventFlagName(_clipEndFlags[_current].label).c_str());
+			NancySceneState.setEventFlag(_clipEndFlags[_current]);
+		}
+
+		++_current;
+		_started = false;
+	}
 }
 
 } // End of namespace Action

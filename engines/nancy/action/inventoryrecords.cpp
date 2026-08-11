@@ -34,6 +34,17 @@ namespace Action {
 void AddInventoryNoHS::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
 
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Constant 36 bytes in nancy18, all 133 records: the item id, the name
+		// of whoever gains it ("Nancy" throughout), then one trailing byte.
+		Common::String owner;
+		readFilename(stream, owner);
+		stream.skip(1);
+		_setCursor = false;
+		_forceCursor = false;
+		return;
+	}
+
 	if (g_nancy->getGameType() >= kGameTypeNancy6) {
 		_setCursor = stream.readUint16LE();
 		_forceCursor = stream.readUint16LE();
@@ -72,6 +83,13 @@ void AddInventoryNoHS::execute() {
 
 void RemoveInventoryNoHS::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Constant 35 bytes, 29/29: the item id then the owner's name. The add
+		// record next door is the same plus one trailing byte.
+		Common::String owner;
+		readFilename(stream, owner);
+	}
 }
 
 void RemoveInventoryNoHS::execute() {
@@ -201,10 +219,34 @@ void PopInvViewPriorScene::execute() {
 
 void GoInvViewScene::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Constant 2 bytes in nancy18, all 9 records: the trailing flag is gone.
+		_addToInventory = false;
+		return;
+	}
+
 	_addToInventory = stream.readUint16LE();
 }
 
 void GoInvViewScene::execute() {
+	// Nancy16 has no INV chunk at all - the inventory table moved into its own
+	// INVD member (same root cause as the playItemCantSound crash). The assert
+	// below therefore aborted the process outright, and it is not a theoretical
+	// path: all nine of this game's AR 126 records name item 45, and one of them
+	// is live in the kiosk S5202 as soon as the scene has the state a player
+	// arriving there would have. INVD carries what this record needs - the
+	// "has a view scene" flag and the scene's "s<id>"-form name.
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// The table lookup, the push and the scene change all live in
+		// Scene::openItemViewScene, because the NDUI InvButtons reach the exact
+		// same operation from the taskbar (see NDUIPanel::runAction) and the two
+		// must not drift apart.
+		NancySceneState.openItemViewScene(_itemID);
+		_isDone = true;
+		return;
+	}
+
 	auto *inv = GetEngineData(INV);
 	assert(inv);
 

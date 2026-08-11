@@ -46,6 +46,12 @@ public:
 	// Loads a single IFF file. These can either be inside standalone .cif files, or embedded inside a ciftree
 	IFF *loadIFF(const Common::Path &name);
 
+	// Loads a single IFF out of one specific ciftree, bypassing the global search order.
+	// Needed when more than one loaded tree provides a member with the same name; e.g. the
+	// player-character trees in Nancy16+ have CONVO and INVENTORY members that would
+	// otherwise be shadowed by the same-named members of ciftree.dat.
+	IFF *loadIFFFromTree(const Common::String &treeName, const Common::Path &name);
+
 	// Load a new ciftree
 	bool readCifTree(const Common::String &name, const Common::String &ext, int priority);
 	PatchTree *readPatchTree(Common::SeekableReadStream *stream, const Common::String &name, int priority);

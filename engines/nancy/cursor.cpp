@@ -24,6 +24,7 @@
 
 #include "engines/nancy/nancy.h"
 #include "engines/nancy/cursor.h"
+#include "engines/nancy/input.h"
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/resource.h"
 #include "engines/nancy/util.h"
@@ -423,7 +424,19 @@ void CursorManager::applyCursor() {
 	}
 
 	if (_warpedMousePos.x != -500 && _warpedMousePos.y != -500) {
-		g_system->warpMouse(_warpedMousePos.x, _warpedMousePos.y);
+		// Scene::handleInput and the popups call warpCursor(input.mousePos) to
+		// keep the pointer pinned; during normal play that must move the real
+		// pointer. When a debug hook is driving, though, input.mousePos IS the
+		// synthetic position, so warping the OS pointer to it drags the user's
+		// mouse across the screen on every scripted click - which made a machine
+		// running several test instances unusable. Redirect the warp to the
+		// virtual cursor instead; the logical behaviour is identical.
+		if (g_nancy->_input->isDebugMouseActive()) {
+			g_nancy->_input->setDebugMousePos(_warpedMousePos);
+		} else {
+			g_system->warpMouse(_warpedMousePos.x, _warpedMousePos.y);
+		}
+
 		_warpedMousePos.x = -500;
 		_warpedMousePos.y = -500;
 	}

@@ -99,6 +99,12 @@ public:
 	Common::SeekableReadStream *createReadStreamRaw(const Common::Path &path) const;
 	bool sync(Common::Serializer &ser);
 
+	// Nancy16 replaced the CifTree container with a "CIF FILE"-tagged version 3 format:
+	// the up-front hash table and info blocks are gone, and the member list now lives in
+	// an index at the end of the file. Reading it needs random access to the tail, so it
+	// works on the stream directly instead of going through the Serializer.
+	bool syncV3();
+
 	void addInfo(const CifInfo &info) { _writeFileMap.push_back(info); }
 	uint writeFileMapSize() const { return _writeFileMap.size(); }
 	uint32 getDataOffset(uint i) const { return _writeFileMap[i].dataOffset; }

@@ -32,6 +32,8 @@
 #include "nancy/time.h"
 #include "nancy/commontypes.h"
 #include "nancy/enginedata.h"
+#include "nancy/ttffont.h"
+#include "nancy/trace.h"
 
 namespace Common {
 class RandomSource;
@@ -54,7 +56,34 @@ class Serializer;
  */
 namespace Nancy {
 
-static const int kSavegameVersion = 7;
+// 8 adds the Nancy16 stream table (see streams.h) to the Scene block.
+// 9 adds the Nancy16 NDUI show/hide deltas (see nduipanel.h) to the Scene block.
+static const int kSavegameVersion = 9;
+
+// The three options-screen settings ScummVM has no key of its own for, kept in
+// the game's config domain beside the ones it does (music_volume, sfx_volume,
+// speech_volume, subtitles). Each is stored in the same units the game's own
+// PhantomOfVenice.INI uses, so a value can be read straight across:
+//
+//   nancy_matte_colour  a COLR chunk id. The INI stores the resolved ARGB
+//                       (BackgroundColor=4278190080 = 0xff000000 = COLR 4), but
+//                       the id is what the options screen sends, and it survives
+//                       a change to the palette.
+//   nancy_font_scale    percent. The INI's FontScale is this x10 (1270 = 127%).
+//   nancy_window_mode   0 standard/CRT, 1 windowed, 2 widescreen/LCD - the INI's
+//                       WindowMode, whose own comment gives those three names.
+extern const char *const kConfMatteColour;
+extern const char *const kConfFontScale;
+extern const char *const kConfWindowMode;
+
+// COLR chunk 4, black: what the retail INI ships as BackgroundColor.
+static const int kDefaultMatteColourID = 4;
+
+// The port renders text at the authored FONT heights, which is the 100% option.
+// The retail INI ships 127, i.e. the game's default is "Large Text"; adopting
+// that as the port's default would change every text metric in the game, so it
+// is offered rather than imposed.
+static const int kDefaultFontScalePercent = 100;
 
 struct NancyGameDescription;
 
@@ -89,6 +118,46 @@ public:
 
 	void secondChance();
 
+	// Nancy16 action record 114, "Save a Named Game", asks for a checkpoint save
+	// under a script-authored name such as "Start_Game". ScummVM save slots are
+	// integers, so the name has to be mapped onto one; see nancy.cpp for the
+	// rules. Silently does nothing if the engine cannot save right now.
+	void saveNamedGame(const Common::String &name);
+
+	// The slot a named save resolves to, or -1 if the reserved band is full.
+	// Exposed for the console/tests; saveNamedGame is the normal entry point.
+	int getNamedSaveSlot(const Common::String &name) const;
+
+	// The slot a named save already occupies, or -1 if no save by that name
+	// exists. Distinct from getNamedSaveSlot(), which falls back to the first
+	// free slot - a fine answer for "where should this be written", and exactly
+	// the wrong one for "what should be read back".
+	int findNamedSaveSlot(const Common::String &name) const;
+
+	// Nancy16 action record 115, "Load a saved Game", is the other half of 114:
+	// it restores the checkpoint that 114 wrote under the same name. The load is
+	// queued rather than performed, because it tears down the scene - including
+	// the record array ActionManager is in the middle of iterating - and runs
+	// from the top of the main loop instead. See runPendingNamedLoad().
+	void requestNamedLoad(const Common::String &name);
+
+	// Nancy16 action record 108, "Clear Saved Data", drops a named save.
+	void deleteNamedGame(const Common::String &name);
+
+	// The NDUI load dialog's own Load button. Deferred for the same reason
+	// requestNamedLoad() is: the load tears down the Scene whose input handler
+	// asked for it, so it cannot happen on the stack of that handler.
+	void requestSlotLoad(int slot);
+
+	// Size of the reserved band of slots that named saves live in. It sits
+	// directly below the second chance slot, which is getMaximumSaveSlot().
+	static const int kNumNamedSaveSlots = 20;
+
+	// The first slot of that band. Slots below it are the player's own, which is
+	// what the NDUI save dialog offers and the NDUI load dialog lists.
+	int firstNamedSaveSlot() const;
+
+
 	const char *getCopyrightString() const;
 	uint32 getGameFlags() const;
 	const char *getGameId() const;
@@ -115,12 +184,16 @@ public:
 
 	// Managers
 	ResourceManager *_resource;
+
+	// Nancy16+ only: substitutes for the real typefaces the FONT registry names
+	// but the game does not ship. Empty for earlier games, which use glyph atlases.
+	TTFFontProvider _ttfFonts;
 	GraphicsManager *_graphics;
 	CursorManager *_cursor;
 	InputManager *_input;
 	SoundManager *_sound;
 
-	Common::RandomSource *_randomSource;
+	NancyRandomSource *_randomSource;
 
 	// Used to check whether we need to show the SaveDialog
 	bool _hasJustSaved;
@@ -149,6 +222,26 @@ private:
 	void populateStaticData();
 
 	Common::Error synchronize(Common::Serializer &serializer);
+
+	// Performs a load queued by requestNamedLoad(). Called from the top of the
+	// main loop, at the same point in the frame that a load from ScummVM's own
+	// menu happens, so it goes through exactly the sequence that path already
+	// exercises.
+	void runPendingNamedLoad();
+
+	// Name of a checkpoint save an action record asked to restore, empty when
+	// there is nothing pending. A pending load is retried every frame until the
+	// engine will take it, so this can outlive the frame that set it.
+	Common::String _pendingNamedLoad;
+
+	// Whether the pending load has already been refused once, so the "waiting"
+	// note is logged on the first frame rather than on all of them.
+	bool _namedLoadWasDeferred = false;
+
+	// Slot the NDUI load dialog asked for, -1 when there is nothing pending.
+	// Runs from the same place, and before the named load: a player who clicks
+	// Load has overridden whatever a record queued on an earlier frame.
+	int _pendingSlotLoad = -1;
 
 	bool isCompressed();
 

@@ -38,6 +38,14 @@ namespace State {
 class State;
 }
 
+// Defined in action/puzzle/chasemappuzzle.cpp. The Venice chase autoplay's one
+// call into the input layer: true when this poll should synthesise a left click
+// at `clickAt`, which is the map hotspot Nancy should take next. Declared here
+// rather than pulled in from that record's own header, because including it
+// would bring the namespace name Nancy::Action into scope and hide
+// Common::Action from initKeymaps().
+bool chaseAutoPlayNextClick(Common::Point &clickAt);
+
 struct NancyInput {
 	enum InputType : uint16 {
 		kLeftMouseButtonDown	= 1 << 0,
@@ -101,6 +109,29 @@ public:
 
 private:
 	uint16 _inputs;
+
+	// Debug-driven virtual cursor. The autoclick/scene-script/autodrag hooks used
+	// to call g_system->warpMouse(), which moves the REAL system pointer - so a
+	// headless test run fought the user for their mouse, and several concurrent
+	// runs made the machine unusable. These hooks now set a virtual position that
+	// getInput() substitutes instead. Once any hook has fired the override is
+	// sticky, which also stops a stray human mouse movement from corrupting a
+	// scripted run. The engine's own cursor warp (Cursor::_warpedMousePos) is a
+	// real game behaviour and is deliberately left alone.
+	Common::Point _debugMousePos;
+	bool _debugMousePosSet = false;
+
+public:
+	void setDebugMousePos(const Common::Point &pos) {
+		_debugMousePos = pos;
+		_debugMousePosSet = true;
+	}
+
+	// True once a debug hook has taken over the cursor. The engine's own
+	// warpCursor() must then move the VIRTUAL cursor, not the OS pointer.
+	bool isDebugMouseActive() const { return _debugMousePosSet; }
+
+private:
 	Common::Array<Common::KeyState> _otherKbdInput;
 	bool _mouseEnabled;
 	NancyState::NancyState _inputBeginState;

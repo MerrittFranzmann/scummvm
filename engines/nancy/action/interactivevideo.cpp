@@ -51,7 +51,13 @@ void InteractiveVideo::readData(Common::SeekableReadStream &stream) {
 	}
 
 	Common::SeekableReadStream *ivFile = SearchMan.createReadStreamForMember(ivFilename.append(".iv"));
-	assert(ivFile);
+	if (!ivFile) {
+		// Nancy16 records reaching this class are mis-mapped and name no .iv
+		// file. Asserting takes the whole engine down; leaving the record inert
+		// is survivable and shows up in the audit instead.
+		warning("Could not open interactive video file '%s'", ivFilename.toString().c_str());
+		return;
+	}
 
 	readFilename(*ivFile, _videoName);
 

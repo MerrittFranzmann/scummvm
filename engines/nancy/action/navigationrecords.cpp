@@ -30,6 +30,17 @@ namespace Nancy {
 namespace Action {
 
 void SceneChange::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _type == 15) {
+		// Nancy16's type 15 carries a bare scene id and nothing else - its whole
+		// payload is 2 bytes, against 6 for the type 16 descriptor. Reading the
+		// full descriptor here over-reads by four and yields a garbage
+		// destination, which is how a change to kNoScene got requested.
+		_sceneChange.sceneID = stream.readUint16LE();
+		_sceneChange.frameID = 0;
+		_sceneChange.continueSceneSound = kContinueSceneSound;
+		return;
+	}
+
 	_sceneChange.readData(stream);
 }
 
@@ -137,7 +148,24 @@ void Hot1FrSceneChange::readData(Common::SeekableReadStream &stream) {
 
 	if (!_isTerse) {
 		SceneChange::readData(stream);
-		_hotspotDesc.readData(stream);
+
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// Constant 26 bytes in nancy18, all 476 records: the 6-byte scene
+			// core, a 32-bit CURSOR id, then the rect.
+			//
+			// This was read as a hotspot frame id, which gates _hasHotspot on
+			// frameID == the current viewport frame. Every scene carrying one of
+			// these records has single-frame art, so any nonzero value could
+			// never match - and 438 of the 476 are nonzero, leaving 92% of the
+			// game's plain hotspots permanently dead. The value histogram also
+			// matches type 91's known uint32 cursor field, not any frame index.
+			_hoverCursor = (CursorManager::CursorType)stream.readUint32LE();
+			_dynamicCursor = true;
+			_hotspotDesc.frameID = 0;
+			readRect(stream, _hotspotDesc.coords);
+		} else {
+			_hotspotDesc.readData(stream);
+		}
 	} else {
 		_sceneChange.sceneID = stream.readUint16LE();
 		if (g_nancy->getGameType() >= kGameTypeNancy10 && _dynamicCursor) {
@@ -348,6 +376,59 @@ void MapCallHotMultiframe::execute() {
 		MapCall::execute();
 		break;
 	}
+}
+
+void SceneChangeTheWorks::readData(Common::SeekableReadStream &stream) {
+	SceneChange::readData(stream);
+
+	Common::String unusedName;	// empty in all 66 records
+	readFilename(stream, unusedName);
+	stream.skip(2);				// 1 in all 66
+
+	_flag.label = stream.readSint16LE();
+	_flag.flag = (byte)stream.readUint16LE();
+	_hoverCursor = (CursorManager::CursorType)stream.readUint32LE();
+
+	const uint16 numHotspots = stream.readUint16LE();
+	_hotspots.resize(numHotspots);
+	for (uint i = 0; i < numHotspots; ++i) {
+		_hotspots[i].readData(stream);
+	}
+}
+
+void SceneChangeTheWorks::execute() {
+	if (_state == kActionTrigger) {
+		NancySceneState.setEventFlag(_flag);
+	}
+
+	HotMultiframeSceneChange::execute();
+}
+
+void SceneChangeWithStream::readData(Common::SeekableReadStream &stream) {
+	_sceneChange.readData(stream);
+	readFilename(stream, _streamName);
+}
+
+void SceneChangeWithStream::execute() {
+	if (_streamName.empty() || _streamName.equalsIgnoreCase("MainStream")) {
+		// Addressed to the player's flow. `true` bypasses the stream redirect,
+		// so this works the same whether the record is running in the main flow
+		// or inside a stream - and inside a stream it is the whole point.
+		NancySceneState.changeScene(_sceneChange, true);
+		_isDone = true;
+		return;
+	}
+
+	Stream *target = NancySceneState.getStreams().find(_streamName);
+	if (target) {
+		target->requestSceneChange(_sceneChange);
+	} else {
+		// Every record in the game names MainStream, so this is defensive.
+		debugC(1, kDebugActionRecord, "Ignoring scene change addressed to stream '%s', which is not running",
+			_streamName.c_str());
+	}
+
+	_isDone = true;
 }
 
 } // End of namespace Action

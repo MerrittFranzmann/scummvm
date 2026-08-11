@@ -58,6 +58,9 @@ public:
 	SoundDescription _solveSound;
 	SceneChangeWithFlag _exitScene;
 	Common::Rect _exitHotspot;
+	// Nancy16 carries the exit hotspot's cursor in the record; 0 means "use the
+	// engine's puzzle-exit cursor", as it does everywhere else in that game.
+	uint16 _exitCursorType = 0;
 
 	SolveState _solveState = kNotSolved;
 	Graphics::ManagedSurface _image;
@@ -69,7 +72,26 @@ public:
 protected:
 	Common::String getRecordTypeName() const override { return "RotatingLockPuzzle"; }
 
+	void readNancy16Data(Common::SeekableReadStream &stream);
 	void drawDial(uint id);
+
+	// Every dial sits on its target. execute() uses this to decide the puzzle is
+	// over; the autoplay below uses the SAME function to decide it is done, so
+	// the two can never disagree about what "solved" means.
+	bool isSolved() const;
+
+	// The one implementation of "a click on dial id's up (or down) wheel was
+	// accepted": plays the click sound, advances the icon with the ring wrap,
+	// redraws. handleInput() calls it for a real click and the autoplay calls it
+	// for a synthetic one, so a synthetic step cannot drift from a real one.
+	void stepDial(uint id, bool up);
+
+	// -- debug affordance, default off; see the comment in the .cpp --
+	static bool autoPlay();
+	void autoStep();
+
+	// Autoplay only: how many notches the hook has moved, for its one log line.
+	uint _autoClicks = 0;
 };
 
 } // End of namespace Action

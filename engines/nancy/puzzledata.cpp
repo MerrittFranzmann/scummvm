@@ -230,12 +230,23 @@ void SortPuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, solvedState);
 }
 
+void ScopaPuzzleData::synchronize(Common::Serializer &ser) {
+	ser.syncAsSint16LE(score[0]);
+	ser.syncAsSint16LE(score[1]);
+}
+
 void MagnetMazePuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, magnetState);
 }
 
 void GridMapPuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, itemState);
+}
+
+void SentryPuzzleData::synchronize(Common::Serializer &ser) {
+	ser.syncString(pendingLevel);
+	ser.syncAsSint16LE(pendingCol);
+	ser.syncAsSint16LE(pendingRow);
 }
 
 void QuizPuzzleData::synchronize(Common::Serializer &ser) {
@@ -487,8 +498,66 @@ void DrivingData::synchronize(Common::Serializer &ser) {
 	ser.syncAsByte(flatTire);
 }
 
+void CollectionData::synchronize(Common::Serializer &ser) {
+	uint16 numCollections = collections.size();
+	ser.syncAsUint16LE(numCollections);
+
+	if (ser.isSaving()) {
+		for (auto &c : collections) {
+			Common::String name = c._key;
+			ser.syncString(name);
+			ser.syncAsUint32LE(c._value.maxEntries);
+
+			byte isCharacter = c._value.isCharacter ? 1 : 0;
+			ser.syncAsByte(isCharacter);
+
+			uint16 numEntries = c._value.size();
+			ser.syncAsUint16LE(numEntries);
+
+			for (uint i = 0; i < numEntries; ++i) {
+				if (c._value.isCharacter) {
+					ser.syncString(c._value.strings[i]);
+				} else {
+					ser.syncAsDoubleLE(c._value.numbers[i]);
+				}
+			}
+		}
+	} else {
+		collections.clear();
+
+		for (uint i = 0; i < numCollections; ++i) {
+			Common::String name;
+			ser.syncString(name);
+
+			Collection &c = collections.getOrCreateVal(name);
+			ser.syncAsUint32LE(c.maxEntries);
+
+			byte isCharacter = 0;
+			ser.syncAsByte(isCharacter);
+			c.isCharacter = isCharacter != 0;
+
+			uint16 numEntries = 0;
+			ser.syncAsUint16LE(numEntries);
+
+			for (uint j = 0; j < numEntries; ++j) {
+				if (c.isCharacter) {
+					Common::String str;
+					ser.syncString(str);
+					c.strings.push_back(str);
+				} else {
+					double val = 0.0;
+					ser.syncAsDoubleLE(val);
+					c.numbers.push_back(val);
+				}
+			}
+		}
+	}
+}
+
 PuzzleData *makePuzzleData(const uint32 tag) {
 	switch(tag) {
+	case CollectionData::getTag():
+		return new CollectionData();
 	case DrivingData::getTag():
 		return new DrivingData();
 	case WordFindPuzzleData::getTag():
@@ -511,10 +580,14 @@ PuzzleData *makePuzzleData(const uint32 tag) {
 		return new BeadPuzzleData();
 	case SortPuzzleData::getTag():
 		return new SortPuzzleData();
+	case ScopaPuzzleData::getTag():
+		return new ScopaPuzzleData();
 	case MagnetMazePuzzleData::getTag():
 		return new MagnetMazePuzzleData();
 	case GridMapPuzzleData::getTag():
 		return new GridMapPuzzleData();
+	case SentryPuzzleData::getTag():
+		return new SentryPuzzleData();
 	case JournalData::getTag():
 		return new JournalData();
 	case TableData::getTag():

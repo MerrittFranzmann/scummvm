@@ -263,6 +263,26 @@ SoundManager::~SoundManager() {
 }
 
 Common::String SoundManager::resolveMusicMix(const Common::String &name) const {
+	// Nancy16 merged LVLN and MMIX into ENVS, so BOOT carries no MMIX chunk at
+	// all and the location codes have to be resolved against the environment
+	// table instead. Without this every scene asks for a file named after its
+	// code - "TUT.his" rather than one of TUT_01..TUT_nn - finds nothing, and
+	// plays silence.
+	if (auto *envs = (const ENVS *)g_nancy->getEngineData("ENVS")) {
+		for (const ENVS::Environment &env : envs->environments) {
+			if (!env.sceneCode.equalsIgnoreCase(name)) {
+				continue;
+			}
+
+			if (env.musicNames.empty()) {
+				return "NO SOUND";
+			}
+
+			const uint pick = g_nancy->_randomSource->getRandomNumber(env.musicNames.size() - 1);
+			return env.musicNames[pick];
+		}
+	}
+
 	auto *mmix = GetEngineData(MMIX);
 	if (!mmix) {
 		// Pre-Nancy13, or no mix table present
@@ -419,6 +439,15 @@ void SoundManager::playSound(uint16 channelID) {
 						0, DisposeAfterUse::NO);
 
 	soundEffectMaintenance(channelID, true);
+
+	// A sound started while a Nancy16 stream's records are executing belongs to
+	// that stream, so ending the stream can silence it. No-op in the main flow.
+	NancySceneState.getStreams().noteSoundChannel(channelID);
+
+	// Ownership by the ambient environment is re-decided on every play, so a
+	// main-flow record taking the channel back also takes the exemption back.
+	const Stream *owner = NancySceneState.getStreams().executing();
+	chan.isAmbient = owner && owner->isAmbient();
 }
 
 void SoundManager::playSound(const SoundDescription &description) {
@@ -460,6 +489,20 @@ void SoundManager::pauseAllSounds(bool pause) {
 	_mixer->pauseAll(pause);
 }
 
+Common::String SoundManager::describeActiveChannels() const {
+	Common::String out;
+	for (uint i = 0; i < _channels.size(); ++i) {
+		if (!_mixer->isSoundHandleActive(_channels[i].handle)) {
+			continue;
+		}
+
+		out += Common::String::format("%s%u:%s%s", out.empty() ? "" : ",",
+			i, _channels[i].name.c_str(), _channels[i].isAmbient ? "*" : "");
+	}
+
+	return out;
+}
+
 bool SoundManager::isSoundPlaying(uint16 channelID) const {
 	if (channelID >= _channels.size() || !_channels[channelID].stream)
 		return false;
@@ -493,6 +536,9 @@ void SoundManager::stopSound(uint16 channelID) {
 	if (isSoundPlaying(channelID)) {
 		_mixer->stopHandle(chan.handle);
 	}
+
+	// A stopped channel is nobody's, so the ambient exemption goes with it.
+	chan.isAmbient = false;
 
 	// Persistent sounds only stop playing but do not get unloaded
 	if (!chan.isPersistent) {
@@ -736,6 +782,15 @@ void SoundManager::stopAndUnloadSceneSpecificSounds() {
 	}
 
 	for (uint i = 0; i < numSSChans; ++i) {
+		// A Nancy16 ambient environment stream is not the scene, and its bed is
+		// a one-shot record: stopping it here would end the location's ambience
+		// at the first scene change inside that same location, permanently.
+		// StreamManager::end() is what silences these, when the player actually
+		// leaves. See streams.h.
+		if (i < _channels.size() && _channels[i].isAmbient) {
+			continue;
+		}
+
 		stopSound(i);
 	}
 

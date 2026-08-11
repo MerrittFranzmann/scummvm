@@ -35,6 +35,7 @@
 #include "engines/nancy/iff.h"
 #include "engines/nancy/input.h"
 #include "engines/nancy/graphics.h"
+#include "engines/nancy/ndui.h"
 
 #include "engines/nancy/state/scene.h"
 
@@ -51,6 +52,7 @@ NancyConsole::NancyConsole() : GUI::Debugger() {
 	registerCmd("chunk_export", WRAP_METHOD(NancyConsole, Cmd_chunkExport));
 	registerCmd("chunk_hexdump", WRAP_METHOD(NancyConsole, Cmd_chunkHexDump));
 	registerCmd("chunk_list", WRAP_METHOD(NancyConsole, Cmd_chunkList));
+	registerCmd("ndui_dump", WRAP_METHOD(NancyConsole, Cmd_nduiDump));
 	registerCmd("show_image", WRAP_METHOD(NancyConsole, Cmd_showImage));
 	registerCmd("export_image", WRAP_METHOD(NancyConsole, Cmd_exportImage));
 	registerCmd("play_video", WRAP_METHOD(NancyConsole, Cmd_playVideo));
@@ -322,6 +324,30 @@ bool NancyConsole::Cmd_chunkList(int argc, const char **argv) {
 
 	debugPrintf("\n");
 	delete iff;
+
+	return true;
+}
+
+bool NancyConsole::Cmd_nduiDump(int argc, const char **argv) {
+	if (argc > 2) {
+		debugPrintf("Parses every NDUI chunk in the player-character trees and dumps the widget tree.\n");
+		debugPrintf("Reports how many chunks were consumed exactly, with nothing left over.\n");
+		debugPrintf("Usage: %s [member]\n", argv[0]);
+		return true;
+	}
+
+	if (g_nancy->getGameType() < kGameTypeNancy16) {
+		debugPrintf("NDUI was introduced in Nancy16; this game has no NDUI chunks.\n");
+		return true;
+	}
+
+	Common::Array<Common::String> lines;
+	uint total = 0;
+	dumpAllNDUI(lines, argc == 2 ? argv[1] : Common::String(), true, total);
+
+	for (const Common::String &line : lines) {
+		debugPrintf("%s\n", line.c_str());
+	}
 
 	return true;
 }

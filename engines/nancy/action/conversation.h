@@ -48,6 +48,19 @@ public:
 	void execute() override;
 
 	virtual bool isVideoDonePlaying() { return true; }
+
+	// Nancy16 reordered this record and put a counted name array at the front.
+	// Verified by exact byte consumption: 702/702 records of types 57 and 58.
+	void readDataNancy16(Common::SeekableReadStream &stream);
+
+	// The names the record opens with. names[0] is the sound, and for the cel
+	// variant also the XSheet; the rest are alternate takes.
+	Common::Array<Common::String> _nancy16Names;
+
+	// Nancy16 names the conditional-dialogue and goodbye scripts directly
+	// rather than by character id. Empty means the record has none.
+	Common::String _nancy16ConditionalScript;
+	Common::String _nancy16GoodbyeScript;
 	bool isViewportRelative() const override { return true; }
 
 protected:
@@ -119,6 +132,13 @@ protected:
 	void addGoodbye();
 	void addConditionalDialogueNancy12();
 	void addGoodbyeNancy12();
+
+	// Nancy12 addresses the conditional-dialogue and goodbye tables by
+	// character id (S<800 + id> / S<900 + id>); Nancy16 names the script
+	// outright ("infocheck_marg", "bye_marg"). Same table format either way, so
+	// both callers share these.
+	void addConditionalDialogueFromScript(const Common::Path &scriptName);
+	void addGoodbyeFromScript(const Common::Path &scriptName);
 
 	Common::String _text;
 
@@ -221,6 +241,35 @@ protected:
 
 	uint _curFrame = 0;
 	uint32 _nextFrameTime = 0;
+
+	// --- Nancy16 -------------------------------------------------------
+	// The cel pipeline is gone: each XSheet layer is a Bink video with an alpha
+	// channel, overlaid on the viewport. Verified across the corpus - all 275
+	// type 57 records name a .bik that ships with the game, while only 1 of the
+	// 1004 names in the sound-only type 58 records does.
+	//
+	// There are two layers: layer 1 is the head, named after the sheet itself
+	// and animated one frame per sheet entry; layer 0 is the character's body,
+	// a single long video shared by every sheet for that character, indexed
+	// per head frame by the sheet's entry table. See readXSheetNancy16().
+	void readXSheetNancy16(const Common::String &xsheetName);
+	void drawNancy16Layer(RenderedCel &obj, const Graphics::Surface &frame, const Common::Rect &dest);
+	int nancy16BodyFrameFor(uint headFrame) const;
+
+	// Indices into _celRObjects on the Nancy16 path.
+	static const uint kNancy16HeadCel = 0;
+	static const uint kNancy16BodyCel = 1;
+
+	MoviePlayer _nancy16Video;
+	bool _nancy16HasVideo = false;
+	Common::Rect _nancy16Dest;	// from the XSheet's layer 1 (head) rect
+
+	MoviePlayer _nancy16BodyVideo;
+	bool _nancy16HasBody = false;
+	Common::String _nancy16BodyName;			// XSheet layer 0 name, e.g. "COLINBODY"
+	Common::Rect _nancy16BodyDest;				// from the XSheet's layer 0 (body) rect
+	Common::Array<int32> _nancy16BodyFrames;	// one body frame index per head frame
+	int _nancy16BodyCurFrame = -1;				// body frame currently pasted, -1 = none
 
 	Common::Array<RenderedCel> _celRObjects;
 

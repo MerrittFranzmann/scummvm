@@ -22,6 +22,7 @@
 #include "common/random.h"
 
 #include "engines/nancy/nancy.h"
+#include "engines/nancy/trace.h"
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/resource.h"
 #include "engines/nancy/sound.h"
@@ -168,7 +169,7 @@ bool TypingQuizPuzzle::isValidChar(byte c) const {
 }
 
 char TypingQuizPuzzle::pickRandomChar() {
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 	int maxChar = (_keyboardMode != 0) ? 0x100 : (_allowedChars[0] != 0 ? 0x7f : 0x7b);
 
 	for (;;) {
@@ -184,7 +185,7 @@ char TypingQuizPuzzle::pickRandomChar() {
 }
 
 int TypingQuizPuzzle::pickFreePosition() {
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 
 	for (;;) {
 		int idx = (int)rnd.getRandomNumber(_numPositions - 1);
@@ -201,7 +202,7 @@ int TypingQuizPuzzle::pickFreePosition() {
 }
 
 void TypingQuizPuzzle::spawnBalloon(uint slot) {
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 	Balloon &b = _balloons[slot];
 
 	b.posIndex = pickFreePosition();
@@ -218,7 +219,7 @@ void TypingQuizPuzzle::spawnInitialBalloons() {
 	for (uint i = 0; i < kMaxBalloons; ++i)
 		_balloons[i].state = kBalloonInactive;
 
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 	_activeCount = (int)rnd.getRandomNumber(_maxBalloons - _minBalloons) + _minBalloons;
 	if (_activeCount > (int)_numPositions)
 		_activeCount = _numPositions;
@@ -228,7 +229,7 @@ void TypingQuizPuzzle::spawnInitialBalloons() {
 }
 
 void TypingQuizPuzzle::respawnBalloons(int maxToAdd) {
-	Common::RandomSource &rnd = *g_nancy->_randomSource;
+	NancyRandomSource &rnd = *g_nancy->_randomSource;
 
 	int target;
 	if (_activeCount + maxToAdd < _minBalloons) {

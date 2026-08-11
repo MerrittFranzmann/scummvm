@@ -23,6 +23,7 @@
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/input.h"
 #include "engines/nancy/nancy.h"
+#include "engines/nancy/trace.h"
 #include "engines/nancy/sound.h"
 #include "engines/nancy/util.h"
 #include "engines/nancy/video.h"
@@ -227,12 +228,98 @@ void PlaySecondaryMovie::readRandomMovieDataNancy14(Common::Serializer &ser, Com
 	applyStartingRandomSequence();
 }
 
+// Nancy16's "Random Movie/Fidget" record, carried by both AR 42 and AR 43 with
+// one layout - a Markov chain over idle clips. Measured on all 40 records
+// (29 of type 43, 11 of type 42), consumed byte-exactly:
+//
+//   char[33] label ("", "NancyDancy", "SerenadeVids")
+//   char[33] starting sequence, or "random_movie"/"RANDOM_MOVIE" for "any"
+//   uint16   draw order (10, 11 or 14)
+//   uint16   video format (1 or 2)
+//   int16    -1 in all 40 records
+//   int16    a scene-change selector; -1 exactly when there is no scene change
+//   uint16   scene ID, 32767 for none; uint16 frame ID, 0 in all 40
+//   byte     per-movie volume (85, or 55 on the two ALT records)
+//   uint16   sequence count, then that many sequence records
+//   uint16   blt-descriptor count, then that many descriptors
+//
+// The sequence record is Nancy14's with one extra int16 in front of the frame
+// range (-1 in 238 of 240 blocks, 2650 in the other two), so the -1/-2 "play the
+// whole clip" sentinels still land on startFrame/lastFrame and resolve in
+// resolveSentinelFrames() as before. That int16 is an event flag the sequence
+// raises when it starts: the two records carrying 2650 (EV_Fango_InRoot) are in
+// S2066 and S2072 and carry it on their STARTING sequence "off_c1root_anim", and
+// 2650 is the sole event-flag gate on the only transition out of S2066.
+// Measured: booting S2066 with the flag injected runs S2066 -> S2036 (which sets
+// 2473 = EV_Saw_Fango_Pigeon, the flag that opens the Venice map) -> S2013 ->
+// S1404 -> S1405 -> S3511; booting it without the flag sits in S2066 for 70
+// seconds with no flags set at all.
+void PlaySecondaryMovie::readRandomMovieDataNancy16(Common::Serializer &ser, Common::SeekableReadStream &stream) {
+	Common::String label;
+	readFilename(ser, label);
+	readFilename(ser, _startingSequenceName);
+
+	uint16 z = 0;
+	ser.syncAsUint16LE(z);
+	_z = z;
+
+	ser.syncAsUint16LE(_videoFormat);
+	ser.skip(2);	// -1 in all 40 records
+	ser.skip(2);	// scene-change selector; the sceneID below already says whether there is one
+
+	ser.syncAsSint16LE(_sceneChange.sceneID);
+	ser.syncAsUint16LE(_sceneChange.frameID);
+
+	if (_sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
+	byte movieVolume = 0;
+	ser.syncAsByte(movieVolume);
+
+	uint16 sequenceCount = 0;
+	ser.syncAsUint16LE(sequenceCount);
+	_sequences.resize(sequenceCount);
+	for (uint i = 0; i < sequenceCount; ++i) {
+		readFilename(ser, _sequences[i].name);
+		ser.syncAsSint16LE(_sequences[i].raiseFlag);
+		ser.syncAsUint16LE(_sequences[i].startFrame);
+		ser.syncAsUint16LE(_sequences[i].lastFrame);
+		ser.syncAsSint32LE(_sequences[i].minPauseMs);
+		ser.syncAsSint32LE(_sequences[i].maxPauseMs);
+
+		byte pauseChance = 0;
+		ser.syncAsByte(pauseChance);
+		_sequences[i].stayWeight = pauseChance;
+
+		uint16 nextCount = 0;
+		ser.syncAsUint16LE(nextCount);
+		_sequences[i].nextSequences.resize(nextCount);
+		for (uint j = 0; j < nextCount; ++j) {
+			readFilename(ser, _sequences[i].nextSequences[j].name);
+			ser.syncAsUint16LE(_sequences[i].nextSequences[j].weight);
+		}
+	}
+
+	uint16 numVideoDescs = 0;
+	ser.syncAsUint16LE(numVideoDescs);
+	_videoDescs.resize(numVideoDescs);
+	for (uint i = 0; i < numVideoDescs; ++i) {
+		_videoDescs[i].readData(stream);
+	}
+
+	applyStartingRandomSequence();
+}
+
 void PlaySecondaryMovie::applyStartingRandomSequence() {
 	// "RandomMovie" picks any sequence; otherwise look up by name.
 	// Only the first sequence is played; chained playback is TODO.
 	if (!_sequences.empty()) {
 		int startIdx = -1;
-		if (_startingSequenceName == "RandomMovie") {
+		// Nancy16 spells the "any sequence" sentinel "random_movie" (and
+		// "RANDOM_MOVIE" on the two ALT records).
+		if (_startingSequenceName.equalsIgnoreCase("RandomMovie") ||
+				_startingSequenceName.equalsIgnoreCase("random_movie")) {
 			startIdx = g_nancy->_randomSource->getRandomNumber(_sequences.size() - 1);
 		} else {
 			for (uint i = 0; i < _sequences.size(); ++i) {
@@ -263,10 +350,28 @@ void PlaySecondaryMovie::applyStartingRandomSequence() {
 	_sound.name = "NO SOUND";
 }
 
+void PlaySecondaryMovie::raiseSequenceFlag(int index) {
+	if (index < 0 || index >= (int)_sequences.size()) {
+		return;
+	}
+
+	const int16 label = _sequences[index].raiseFlag;
+	if (label <= kEvNoEvent) {
+		return;
+	}
+
+	debugC(1, kDebugScene, "PlayRandomMovie: sequence \"%s\" raises flag %d (%s)",
+		_sequences[index].name.toString().c_str(), label,
+		g_nancy->getEventFlagName(label).c_str());
+	NancySceneState.setEventFlag(label, g_nancy->_true);
+}
+
 bool PlaySecondaryMovie::activateRandomSequence(int index) {
 	if (index < 0 || index >= (int)_sequences.size()) {
 		return false;
 	}
+
+	raiseSequenceFlag(index);
 
 	const RandomSequence &src = _sequences[index];
 	_activeSequenceIndex = index;
@@ -333,8 +438,45 @@ int PlaySecondaryMovie::beginRandomPause(const RandomSequence &seq) {
 	}
 	_randomPauseEndTime = g_system->getMillis() + (uint32)MAX<int32>(0, pauseMs);
 	_randomChainState = kRandomPaused;
-	setVisible(false);
+
+	// Nancy16's pause is the gap between two fidgets of a character who is
+	// standing right there in the shot, so it holds the clip's last frame.
+	// Blanking it makes the office worker flicker out of existence between
+	// sips of his drink.
+	if (g_nancy->getGameType() < kGameTypeNancy16) {
+		setVisible(false);
+	}
+
 	_decoder.pauseVideo(true);
+	return -1;
+}
+
+// The weighted pick among a sequence's successors, without the "stay here"
+// roll that precedes it in the Nancy13 chain.
+int PlaySecondaryMovie::pickSuccessorSequence(const RandomSequence &seq) {
+	if (seq.nextSequences.empty()) {
+		return -1;
+	}
+
+	// All-EQUAL_CHANCE lists (the eight Serenade vignettes) are a uniform pick;
+	// otherwise the weights are percentages summing to 100.
+	const bool equalChance = seq.nextSequences[0].weight == 0xFFFF;
+	const uint step = 100 / seq.nextSequences.size();
+	const uint roll = g_nancy->_randomSource->getRandomNumber(99);
+	uint cumulative = 0;
+
+	for (uint i = 0; i < seq.nextSequences.size(); ++i) {
+		if (i == seq.nextSequences.size() - 1) {
+			cumulative = 100;
+		} else {
+			cumulative += equalChance ? step : seq.nextSequences[i].weight;
+		}
+
+		if (roll < cumulative) {
+			return lookupSequence(seq.nextSequences[i].name);
+		}
+	}
+
 	return -1;
 }
 
@@ -354,6 +496,28 @@ int PlaySecondaryMovie::rollNextSequence() {
 	}
 
 	const RandomSequence &seq = _sequences[_activeSequenceIndex];
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 uses the same byte, but as "chance to pause before moving on"
+		// rather than "chance to stay here". It has to be: 40 of the 240 blocks
+		// carry 100, and under the stay-here reading a 100 parks the chain on
+		// that clip permanently - the office worker in S2066 takes exactly one
+		// drink and then never moves again. Read as a pause chance, the two
+		// numbers next to it (a min/max delay in ms) are the gap between
+		// fidgets, which is what they look like everywhere in the data.
+		if (!_randomPauseExpired && seq.stayWeight != 0 &&
+				(uint)g_nancy->_randomSource->getRandomNumber(99) < seq.stayWeight) {
+			return beginRandomPause(seq);
+		}
+
+		_randomPauseExpired = false;
+
+		const int next = pickSuccessorSequence(seq);
+
+		// A terminal clip (the second half of the CAS_ETCONVO pairs) simply
+		// keeps going rather than freezing the character.
+		return next >= 0 ? next : _activeSequenceIndex;
+	}
 
 	if (g_nancy->getGameType() >= kGameTypeNancy13) {
 		// Two independent rolls: first a percent chance to stay on this
@@ -429,6 +593,69 @@ void PlaySecondaryMovie::readDataNancy14(Common::Serializer &ser, Common::Seekab
 	const bool isNancy15 = g_nancy->getGameType() >= kGameTypeNancy15;
 
 	readFilename(ser, _videoName);
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 inserted a z-order field ahead of the video format, and
+		// replaced firstFrame/lastFrame/playDirection with a five-byte run that
+		// is constant across all 593 records. Reading this with the Nancy14
+		// layout is actively harmful: _firstFrame lands on -1 in 593/593, which
+		// trips the LOOP_RANDOM branch below and desynchronises every record by
+		// four bytes.
+		uint16 z = 0;
+		ser.syncAsUint16LE(z);
+		_z = z;
+
+		ser.syncAsUint16LE(_videoFormat);
+		ser.syncAsUint16LE(_playerCursorAllowed);
+		ser.syncAsUint16LE(_hideOnFinish);
+		ser.syncAsUint16LE(_playStyle);
+
+		// 00 ff ff fe ff in 593/593, so the internal boundaries are not
+		// observable. Two readings fit equally well - see FORMATS.md - and both
+		// mean "play the whole clip forwards", so treat it as that and move on
+		// rather than guessing at a split.
+		ser.skip(5);
+		_firstFrame = 0;
+		_playDirection = kPlayMovieForward;
+
+		// The record carries no frame range, and "play the whole clip" is what
+		// the constant run means, so the end comes from the decoder in init().
+		// Leaving this at 0 stops the movie after its first frame - which is how
+		// the HeR intro ended up audible but frozen on a black frame.
+		_lastFrame = -1;
+
+		ser.syncAsSint16LE(_sceneChange.sceneID);
+		ser.syncAsUint16LE(_sceneChange.frameID);
+
+		// Nancy16's "no scene" sentinel is 0x7fff, not kNoScene
+		if (_sceneChange.sceneID == kNancy16NoScene) {
+			_sceneChange.sceneID = kNoScene;
+		}
+
+		_videoSceneChange = _sceneChange.sceneID != kNoScene ? kMovieSceneChange : kMovieNoSceneChange;
+
+		byte movieVolume = 0;
+		ser.syncAsByte(movieVolume);
+
+		uint16 numFrameFlags = 0;
+		ser.syncAsUint16LE(numFrameFlags);
+		_frameFlags.resize(numFrameFlags);
+		for (uint i = 0; i < numFrameFlags; ++i) {
+			ser.syncAsSint16LE(_frameFlags[i].frameID);
+			ser.syncAsSint16LE(_frameFlags[i].flagDesc.label);
+			ser.syncAsUint16LE(_frameFlags[i].flagDesc.flag);
+		}
+
+		uint16 numVideoDescs = 0;
+		ser.syncAsUint16LE(numVideoDescs);
+		_videoDescs.resize(numVideoDescs);
+		for (uint i = 0; i < numVideoDescs; ++i) {
+			_videoDescs[i].readData(stream);
+		}
+
+		_sound.name = "NO SOUND";
+		return;
+	}
 
 	ser.syncAsUint16LE(_videoFormat);
 	_videoFormat = kLargeVideoFormat;
@@ -514,7 +741,9 @@ void PlaySecondaryMovie::readData(Common::SeekableReadStream &stream) {
 	if (_isRandom) {
 		// Nancy14 reworked the random-movie layout (Nancy13 and earlier use the
 		// older secondaryMovie-record + hotspot-list form).
-		if (g_nancy->getGameType() >= kGameTypeNancy14) {
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			readRandomMovieDataNancy16(ser, stream);
+		} else if (g_nancy->getGameType() >= kGameTypeNancy14) {
 			readRandomMovieDataNancy14(ser, stream);
 		} else {
 			readRandomMovieData(ser, stream);
@@ -597,6 +826,11 @@ void PlaySecondaryMovie::init() {
 			error("Couldn't load video file %s", _videoName.toString().c_str());
 		}
 
+		// Nancy16 records do not carry a frame range; play to the end of the clip.
+		if (_lastFrame < 0 && _decoder.getFrameCount() > 0) {
+			_lastFrame = (int16)(_decoder.getFrameCount() - 1);
+		}
+
 		if (!_paletteName.empty()) {
 			GraphicsManager::loadSurfacePalette(_fullFrame, _paletteName);
 			GraphicsManager::loadSurfacePalette(_drawSurface, _paletteName);
@@ -650,6 +884,13 @@ void PlaySecondaryMovie::execute() {
 		if (g_nancy->getGameType() >= kGameTypeNancy10)
 			NancySceneState.setEventFlag(_videoStartFlag);
 
+		// The starting sequence begins here rather than in
+		// applyStartingRandomSequence(), which runs during readData() when the
+		// scene state is not yet ready to take a flag.
+		if (_isRandom) {
+			raiseSequenceFlag(_activeSequenceIndex);
+		}
+
 		_state = kRun;
 
 		if (Common::Rect(_decoder.getWidth(), _decoder.getHeight()) == NancySceneState.getViewport().getBounds()) {
@@ -671,6 +912,7 @@ void PlaySecondaryMovie::execute() {
 				break;
 			}
 			_randomChainState = kRandomPlaying;
+			_randomPauseExpired = true;	// Nancy16: the pause just happened, move on
 			int picked = rollNextSequence();
 			if (picked >= 0) {
 				activateRandomSequence(picked);
@@ -714,9 +956,13 @@ void PlaySecondaryMovie::execute() {
 					_hotspot = _screenPosition;
 					_hasHotspot = true;
 				}
-			} else if (_isRandom) {
+			} else if (_isRandom && g_nancy->getGameType() < kGameTypeNancy16) {
 				// Random movies aren't gated on hotspot/viewport-frame
 				// matches the way regular PSMs are: play full viewport.
+				// Nancy16's records do carry per-frame blt descriptors (the
+				// piazza fidgets list four panorama frames each), so there the
+				// absence of a match means "not on screen from here", not
+				// "stretch me over the whole viewport".
 				_screenPosition = NancySceneState.getViewport().getBounds();
 				setVisible(true);
 				_hasHotspot = false;
@@ -740,6 +986,61 @@ void PlaySecondaryMovie::execute() {
 			} else {
 				_decoder.seekToFrame(_firstFrame);
 			}
+
+			if (Trace::isOn() && !_traceStartMs) {
+				_traceStartMs = g_system->getMillis();
+			}
+		}
+
+		// Harness: nancy_movie_skip. Cinematics only - a random movie is a
+		// character's idle fidget loop that never ends, so there is nothing to
+		// skip and skipping it would freeze them mid-gesture.
+		//
+		// This does NOT short-circuit to the movie's outcome, and it does NOT
+		// seek. Seeking was the first attempt and it asserted in
+		// BinkDecoder::findKeyFrame: _lastFrame is still the 0xFFFF "play to the
+		// end" sentinel at this point on most records, and a Bink seek to the
+		// far end of an 18 MB file is expensive even when the number is valid.
+		//
+		// Instead the movie's end is moved to where the playhead already is.
+		// The completion branch below is watching for getCurFrame() == _lastFrame
+		// and for the sound to stop, so both of its conditions become true on
+		// this same tick and the record finishes through its own kActionTrigger
+		// path: its trigger flags fire, its scene change happens, nothing is
+		// bypassed. Every frame flag between here and the real end is raised
+		// first, because those set event flags and dropping them would silently
+		// lose game state.
+		if (!_isRandom && !_traceSkipped && !_isFinished && Trace::movieSkip() &&
+				_decoder.isVideoLoaded() && _decoder.getCurFrame() >= 0) {
+			_traceSkipped = true;
+			const int cur = _decoder.getCurFrame();
+			const int count = _decoder.getFrameCount();
+			const bool reverse = _playDirection == kPlayMovieReverse;
+
+			// Resolve the sentinels the same way resolveSentinelFrames() does,
+			// then clamp, so the range swept for frame flags is a real range.
+			int realFirst = (_firstFrame == 0xFFFF) ? 0 : (int)_firstFrame;
+			int realLast = (_lastFrame == 0xFFFE || _lastFrame == 0xFFFF) ?
+				MAX(0, count - 1) : (int)_lastFrame;
+			realFirst = CLIP<int>(realFirst, 0, MAX(0, count - 1));
+			realLast = CLIP<int>(realLast, 0, MAX(0, count - 1));
+
+			for (auto &f : _frameFlags) {
+				const bool passed = reverse ?
+					(f.frameID <= cur && f.frameID >= realFirst) :
+					(f.frameID >= cur && f.frameID <= realLast);
+				if (passed) {
+					NancySceneState.setEventFlag(f.flagDesc);
+				}
+			}
+
+			if (reverse) {
+				_firstFrame = (uint16)cur;
+			} else {
+				_lastFrame = (uint16)cur;
+			}
+
+			g_nancy->_sound->stopSound(_sound);
 		}
 
 		if (_decoder.needsUpdate()) {
@@ -751,7 +1052,16 @@ void PlaySecondaryMovie::execute() {
 				}
 			}
 
-			GraphicsManager::copyToManaged(*_decoder.decodeNextFrame(), _fullFrame, g_nancy->getGameType() == kGameTypeVampire, _videoFormat == kSmallVideoFormat);
+			// Nancy16's movies are Bink at final size, so nothing is ever doubled -
+			// the quarter-size AVF format that flag exists for is gone. It matters
+			// because _videoFormat reads 1 (kSmallVideoFormat) on 530 of the 593
+			// records, and copyToManaged's doubling path flips vertically even
+			// when asked not to, which is what turned the intro title upside down.
+			const bool doubleSize = g_nancy->getGameType() < kGameTypeNancy16 &&
+				_videoFormat == kSmallVideoFormat;
+
+			GraphicsManager::copyToManaged(*_decoder.decodeNextFrame(), _fullFrame,
+				g_nancy->getGameType() == kGameTypeVampire, doubleSize);
 
 			// Nancy14 stores an all -1 srcRect to mean "use the whole frame".
 			Common::Rect srcRect = _videoDescs[descID].srcRect;
@@ -821,6 +1131,29 @@ void PlaySecondaryMovie::execute() {
 				// Stop the video and block it from starting again, but also wait for
 				// sound to end before changing state
 				g_nancy->_sound->stopSound(_sound);
+
+				// Harness: one line per cinematic, whether or not it was skipped,
+				// so "how many seconds of movie is on this route" is a number the
+				// trace answers rather than a guess.
+				if (Trace::isOn() && !_traceReported) {
+					_traceReported = true;
+					// No natural/estimated duration here on purpose: the first
+					// version reported _decoder.getDuration(), and Bink handed
+					// back 4369066 ms (72 minutes) for all three of the movies
+					// measured, so the field was fiction. actual_ms is the wall
+					// clock this record really cost, which is the number the
+					// nancy_movie_skip A/B is measured with.
+					const int actual = _traceStartMs ? (int)(g_system->getMillis() - _traceStartMs) : 0;
+					TraceEvent("movie")
+						.str("name", _videoName.toString('/'))
+						.num("frames", _decoder.getFrameCount())
+						.num("endframe", _decoder.getCurFrame())
+						.num("actual_ms", actual)
+						.boolean("skipped", _traceSkipped)
+						.num("scene", NancySceneState.getSceneInfo().sceneID)
+						.emit();
+				}
+
 				_state = kActionTrigger;
 			}
 		}

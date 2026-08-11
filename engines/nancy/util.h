@@ -27,6 +27,9 @@
 #include "common/rect.h"
 #include "common/serializer.h"
 
+#include "graphics/font.h"
+#include "graphics/managed_surface.h"
+
 #include "engines/nancy/commontypes.h"
 
 namespace Nancy {
@@ -40,6 +43,26 @@ void readRect16(Common::SeekableReadStream &stream, Common::Rect &inRect);
 void readRect16(Common::Serializer &stream, Common::Rect &inRect, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);
 void readRectArray16(Common::SeekableReadStream &stream, Common::Array<Common::Rect> &inArray, uint num, uint totalNum = 0);
 void readRectArray16(Common::Serializer &stream, Common::Array<Common::Rect> &inArray, uint num, uint totalNum = 0, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);
+
+// Draws one markup-bearing string into an arbitrary surface, honouring the same
+// inline codes NDUI panels do (<cN> COLR id, <fN>/<bN> FONT id, <n>, <u>).
+// The two id parameters give the style a string with no codes of its own gets;
+// pass -1 for either to leave it at the default. Returns the height the laid-out
+// text consumed, which lets a caller measure a block before deciding where to
+// scroll it.
+int drawStyledTextToSurface(Graphics::ManagedSurface &surf, const Common::String &text,
+	int baseFontID, int baseColourID,
+	int x, int y, int wrapWidth, Graphics::TextAlign align = Graphics::kTextAlignLeft);
+
+// Recognises one inline markup code, "<c1>" or "<n>", at `pos`. Returns false
+// unless the whole thing is '<', one letter, nothing or decimal digits, and '>',
+// which is what stops literal angle brackets in prose from being eaten.
+// `endPos` comes back as the index of the '>'.
+//
+// Exported because AR 209's typewriter has to count the characters a string will
+// actually type, and a code is not typed. Sharing the renderer's own scanner is
+// the only way that count cannot drift from what gets drawn.
+bool parseMarkupCode(const Common::String &in, uint pos, char &letter, int &number, uint &endPos);
 
 void readFilename(Common::SeekableReadStream &stream, Common::String &inString);
 void readFilename(Common::Serializer &stream, Common::String &inString, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);
@@ -94,6 +117,19 @@ protected:
 	// Contains the actual loading logic, split up into tasks that are as small as possible
 	virtual bool loadInner() = 0;
 };
+
+// Debug affordance used by the synthetic-click harness in InputManager. Defined
+// in state/scene.cpp; declared here so input.cpp does not have to pull in
+// state/scene.h, whose State::Action clashes with the keymapper's Action.
+bool debugGetNthHotspotCentre(uint n, Common::Point &out);
+
+// Debug affordance: the scene the player is currently in, or -1 when there is
+// no Scene instance yet. Same reason for living here as the above.
+int debugGetCurrentSceneID();
+
+// Debug affordance: jump the viewport of a panoramic scene straight to a frame.
+void debugSetViewportFrame(uint frame);
+int debugGetViewportFrame();
 
 } // End of namespace Nancy
 

@@ -24,11 +24,16 @@
 #include "engines/util.h"
 
 #include "engines/nancy/nancy.h"
+#include "common/config-manager.h"
+#include "common/system.h"
+#include "common/tokenizer.h"
+
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/renderobject.h"
 #include "engines/nancy/resource.h"
 #include "engines/nancy/cursor.h"
 #include "engines/nancy/state/scene.h"
+#include "engines/nancy/puzzledata.h"
 
 namespace Nancy {
 
@@ -61,13 +66,173 @@ void GraphicsManager::init() {
 	_screen.setTransparentColor(getTransColor());
 	_screen.clear();
 
+	// Nancy16+ dropped the OB0 chunk from BOOT along with the rest of the hardcoded UI
+	// description, so there is no object0 surface to prime here.
 	const ImageChunk *ob0 = (const ImageChunk *)g_nancy->getEngineData("OB0");
-	assert(ob0);
+	assert(ob0 || g_nancy->getGameType() >= kGameTypeNancy16);
 
-	g_nancy->_resource->loadImage(ob0->imageName, _object0);
+	if (ob0) {
+		g_nancy->_resource->loadImage(ob0->imageName, _object0);
+	}
 }
 
 void GraphicsManager::draw(bool updateScreen) {
+	// Debug affordance: dump the framebuffer once, after a set number of drawn
+	// frames. Screenshotting the host window needs an OS permission that a
+	// headless test run does not have, and this is state-independent, so it also
+	// captures states that never reach Scene::run().
+	// Debug affordance: save to a slot after a set number of frames, so the
+	// save/load round trip can be exercised without the GUI.
+	if (ConfMan.hasKey("nancy_debug_save_after_frames")) {
+		static int saveFrames = 0;
+		static bool saved = false;
+		if (!saved && ++saveFrames > ConfMan.getInt("nancy_debug_save_after_frames")) {
+			// Keep trying rather than giving up on the first refusal. The engine
+			// declines to save inside a conversation or a puzzle, and a long
+			// exploratory run is very likely to be inside one at any given frame,
+			// so a single attempt loses the whole run's progress.
+			if (g_nancy->canSaveGameStateCurrently()) {
+				saved = true;
+				const Common::Error err = g_nancy->saveGameState(0, "debug round trip", false);
+				warning("DEBUGSAVE slot 0: %s", err.getCode() == Common::kNoError ? "ok" : err.getDesc().c_str());
+			} else {
+				static int refusals = 0;
+				if ((refusals++ % 300) == 0) {
+					warning("DEBUGSAVE deferred: engine says it cannot save right now");
+				}
+			}
+		}
+	}
+
+	// Debug affordance: load slot 0 back, in-session, after a set number of
+	// frames. The twin of nancy_debug_save_after_frames, and not the same test:
+	// booting with --save-slot restores into freshly built UI panels, while an
+	// in-session load - which is what the second-chance AR 115 does - restores
+	// over panels that still carry the current session's show/hide deltas.
+	if (ConfMan.hasKey("nancy_debug_load_after_frames")) {
+		static int loadFrames = 0;
+		static bool loaded = false;
+		if (!loaded && ++loadFrames > ConfMan.getInt("nancy_debug_load_after_frames")) {
+			if (g_nancy->canLoadGameStateCurrently()) {
+				loaded = true;
+				const Common::Error err = g_nancy->loadGameState(0);
+				warning("DEBUGLOAD slot 0: %s", err.getCode() == Common::kNoError ? "ok" : err.getDesc().c_str());
+			}
+		}
+	}
+
+	// Debug affordance: raise a list of event flags once, after a set number of
+	// frames, as "label[,label...]". Several Nancy16 records are gated on a flag
+	// that only a widget the engine does not draw yet can set - the death
+	// screens' second-chance buttons are type 53 rollover overlays - so this is
+	// how those records get exercised headlessly.
+	if (ConfMan.hasKey("nancy_debug_set_flags")) {
+		static int flagFrames = 0;
+		static bool flagsSet = false;
+		const int after = ConfMan.hasKey("nancy_debug_set_flags_after_frames") ?
+			ConfMan.getInt("nancy_debug_set_flags_after_frames") : 60;
+
+		if (!flagsSet && ++flagFrames > after && State::Scene::hasInstance() &&
+				NancySceneState.getState() == State::Scene::kRun) {
+			flagsSet = true;
+
+			Common::StringTokenizer tok(ConfMan.get("nancy_debug_set_flags"), ", ");
+			while (!tok.empty()) {
+				const int16 label = (int16)atoi(tok.nextToken().c_str());
+				warning("DEBUGSETFLAG %d", label);
+				NancySceneState.setEventFlag(label, g_nancy->_true);
+			}
+		}
+	}
+
+	// Debug affordances that seed the rest of the player state, so a headless run
+	// can start in the middle of the game instead of replaying from the top.
+	// Flags alone are not enough: most mid-game hotspots are gated on inventory,
+	// and the shops are gated on the player-value table, so a run that injected
+	// only flags would see a mostly-dead scene and report blockers that are just
+	// missing state. These fire on the same schedule as nancy_debug_set_flags.
+	//
+	//   nancy_debug_set_items  = "13,14,18"     inventory item ids
+	//   nancy_debug_set_values = "5=200,38=50"  player table index=value
+	if (ConfMan.hasKey("nancy_debug_set_items") || ConfMan.hasKey("nancy_debug_set_values")) {
+		static int stateFrames = 0;
+		static bool stateSet = false;
+		const int after = ConfMan.hasKey("nancy_debug_set_flags_after_frames") ?
+			ConfMan.getInt("nancy_debug_set_flags_after_frames") : 60;
+
+		if (!stateSet && ++stateFrames > after && State::Scene::hasInstance() &&
+				NancySceneState.getState() == State::Scene::kRun) {
+			stateSet = true;
+
+			if (ConfMan.hasKey("nancy_debug_set_items")) {
+				Common::StringTokenizer tok(ConfMan.get("nancy_debug_set_items"), ", ");
+				while (!tok.empty()) {
+					const int16 id = (int16)atoi(tok.nextToken().c_str());
+					warning("DEBUGSETITEM %d", id);
+					NancySceneState.addItemToInventory(id);
+				}
+			}
+
+			if (ConfMan.hasKey("nancy_debug_set_values")) {
+				auto *table = (TableData *)NancySceneState.getPuzzleData(TableData::getTag());
+				Common::StringTokenizer tok(ConfMan.get("nancy_debug_set_values"), ", ");
+				while (!tok.empty()) {
+					const Common::String pair = tok.nextToken();
+					const uint eq = pair.findFirstOf('=');
+					if (eq == Common::String::npos || !table) {
+						continue;
+					}
+
+					const uint16 index = (uint16)atoi(pair.substr(0, eq).c_str());
+					const int16 value = (int16)atoi(pair.substr(eq + 1).c_str());
+					if (index < table->getNumSingleValues()) {
+						warning("DEBUGSETVALUE %u=%d", index, value);
+						table->setSingleValue(index, value);
+					}
+				}
+			}
+		}
+	}
+
+	// Debug affordance: print the scene's state fingerprint once, after a set
+	// number of frames. Reading back what a load actually restored otherwise
+	// means driving the console by hand, which a headless run cannot do.
+	if (ConfMan.hasKey("nancy_debug_state_after_frames")) {
+		static int stateFrames = 0;
+		static bool dumped = false;
+		if (!dumped && ++stateFrames > ConfMan.getInt("nancy_debug_state_after_frames") &&
+				State::Scene::hasInstance()) {
+			dumped = true;
+			warning("DEBUGSTATE %s", NancySceneState.getStateFingerprint().c_str());
+			warning("DEBUGFLAGS %s", NancySceneState.debugAllEventFlags().c_str());
+		}
+	}
+
+	if (ConfMan.hasKey("nancy_screenshot_after_frames")) {
+		// Several shots, spaced out, rather than one. The OpenGL backend often
+		// hands back a blank buffer for a given frame, so a single capture is not
+		// trustworthy evidence of what was drawn - pick the non-blank one.
+		static int frames = 0;
+		static int taken = 0;
+		const int first = ConfMan.getInt("nancy_screenshot_after_frames");
+		const int count = ConfMan.hasKey("nancy_screenshot_count") ?
+			ConfMan.getInt("nancy_screenshot_count") : 1;
+
+		// nancy_screenshot_every overrides the 150-frame spacing. At 30 fps that
+		// is five seconds a shot, which is coarser than most things worth
+		// watching change: a narration playlist swaps its caption several times
+		// inside one interval, so the ghosting this file's dirty-rect reset fixes
+		// could not be captured frame by frame without it.
+		const int every = ConfMan.hasKey("nancy_screenshot_every") ?
+			MAX(1, ConfMan.getInt("nancy_screenshot_every")) : 150;
+
+		++frames;
+		if (frames >= first && taken < count && (frames - first) % every == 0) {
+			++taken;
+			g_system->saveScreenshot();
+		}
+	}
+
 	if (_isSuppressed && updateScreen) {
 		_isSuppressed = false;
 		return;
@@ -110,6 +275,61 @@ void GraphicsManager::draw(bool updateScreen) {
 				break;
 			}
 		}
+	}
+
+	// Reset every dirty rect to the screen's base colour before recompositing it.
+	//
+	// The loop below rebuilds a dirty rect by blitting every object that
+	// intersects it, bottom-up - but it never resets the pixels first, so the
+	// rect is only truly rebuilt where some object paints opaquely. Anywhere the
+	// stack is transparent (or absent), last frame's pixels survive underneath
+	// the new ones. That is invisible in Nancy1-15, where a full-screen opaque
+	// `Scene::_frame` sits at the bottom of every stack and repaints the base
+	// layer for free; Nancy16 dropped the hardcoded UI chunks that built it (see
+	// GraphicsManager::init - there is no OB0 to prime), so the strip of black
+	// matte between the taskbar icon groups is painted by nothing at all. A
+	// transparent panel over it - the LOWERMATTE caption band - therefore
+	// accumulated every caption a narration playlist had ever shown.
+	//
+	// Restoring the missing base layer here fixes it for any transparent object
+	// whose contents change in place, rather than per caller. Done as its own
+	// pass because dirty rects may partially overlap, and filling one after
+	// another had been composed would erase it.
+	//
+	// The fill is *opaque* black rather than the plain 0 the screen is cleared to
+	// in init(), and that matters for translucent content. `_screen` is a
+	// compositing destination, and ManagedSurface::blitFrom blends a partially
+	// transparent source pixel against whatever it lands on - blitFromInner,
+	// managed_surface.cpp, "Partially transparent, so calculate new pixel colors".
+	// That blend has two branches keyed on the destination's own alpha:
+	//
+	//   aDest == 0xff  a true src-over, dst = src*a + dst*(1-a).
+	//   otherwise      the "translucent target" branch, which divides the weights
+	//                  back out: with aDest == 0 it collapses to dst = src, and
+	//                  records the transparency only in the alpha channel - which
+	//                  nothing downstream reads, since Screen::update hands the
+	//                  buffer to the backend and the backend ignores it.
+	//
+	// Filling with 0 put every pixel that no opaque object covers into the second
+	// branch, so anything translucent drawn over bare screen came out at full
+	// strength. That is what made the nine translucent NDUI taskbar/HUD widgets
+	// (textureColors[0] = 0x5affffff and 0x80ffffff) draw about three times too
+	// bright: the top matte and the strip between the taskbar icon groups are
+	// painted by nothing at all in Nancy16+, exactly where those widgets sit.
+	//
+	// Opaque black is the right base because black is what the game shows where
+	// nothing is drawn, and it is visually identical for everything that was
+	// already correct: an opaque source pixel is still a straight copy, a fully
+	// transparent one is still skipped, and 0x00000000 and 0xff000000 present the
+	// same to the backend.
+	//
+	// The colour is the game's own "Matte Color" setting rather than a constant;
+	// black is only its default. setMatteColour() keeps the alpha at 0xff, which
+	// is what the paragraph above depends on.
+	const uint32 baseColor = _screen.format.ARGBToColor(0xff,
+		(_matteColour >> 16) & 0xff, (_matteColour >> 8) & 0xff, _matteColour & 0xff);
+	for (Common::Rect rect : _dirtyRects) {
+		_screen.fillRect(rect, baseColor);
 	}
 
 	// Perform the actual drawing. This checks for cases where something would be fully obscured,
