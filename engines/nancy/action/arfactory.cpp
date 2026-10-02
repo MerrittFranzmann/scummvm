@@ -48,6 +48,7 @@
 #include "engines/nancy/action/puzzle/bulpuzzle.h"
 #include "engines/nancy/action/puzzle/bombpuzzle.h"
 #include "engines/nancy/action/puzzle/cardgamepuzzle.h"
+#include "engines/nancy/action/puzzle/chasemappuzzle.h"
 #include "engines/nancy/action/puzzle/chesscodepuzzle.h"
 #include "engines/nancy/action/puzzle/collisionpuzzle.h"
 #include "engines/nancy/action/puzzle/cubepuzzle.h"
@@ -784,6 +785,11 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kOrderItems);
 	case 213:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Graph Puzzle": the Venice chase map's node network (S5450)
+			return new ChaseMapPuzzle();
+		}
+
 		return new CollisionPuzzle(CollisionPuzzle::PuzzleType::kTileMove);
 	case 214:
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kKeypad);
