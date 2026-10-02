@@ -145,6 +145,16 @@ struct SortPuzzleData : public PuzzleData {
 
 // Match score for the Nancy16 Scopa game (AR 211). Each hand reloads the
 // scene, so the score has to outlive it.
+struct ScopaPuzzleData : public PuzzleData {
+	ScopaPuzzleData() {}
+	virtual ~ScopaPuzzleData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('S', 'C', 'P', 'A'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	int16 score[2] = { 0, 0 };
+};
+
 // Per-magnet (left, top, right, bottom, locked) packed as 5 int16s. The
 // puzzle's two scenes (3280, 3281) are the same puzzle with the same data,
 // so a single flat array suffices.

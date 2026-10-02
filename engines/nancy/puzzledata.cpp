@@ -289,6 +289,11 @@ void SortPuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, solvedState);
 }
 
+void ScopaPuzzleData::synchronize(Common::Serializer &ser) {
+	ser.syncAsSint16LE(score[0]);
+	ser.syncAsSint16LE(score[1]);
+}
+
 void MagnetMazePuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, magnetState);
 }
@@ -857,6 +862,8 @@ PuzzleData *makePuzzleData(const uint32 tag) {
 		return new BeadPuzzleData();
 	case SortPuzzleData::getTag():
 		return new SortPuzzleData();
+	case ScopaPuzzleData::getTag():
+		return new ScopaPuzzleData();
 	case MagnetMazePuzzleData::getTag():
 		return new MagnetMazePuzzleData();
 	case GridMapPuzzleData::getTag():

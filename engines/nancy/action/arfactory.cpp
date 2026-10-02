@@ -96,6 +96,7 @@
 #include "engines/nancy/action/puzzle/rotatinglockpuzzle.h"
 #include "engines/nancy/action/puzzle/safedialpuzzle.h"
 #include "engines/nancy/action/puzzle/scalepuzzle.h"
+#include "engines/nancy/action/puzzle/scopapuzzle.h"
 #include "engines/nancy/action/puzzle/sentrypuzzle.h"
 #include "engines/nancy/action/puzzle/setplayerclock.h"
 #include "engines/nancy/action/puzzle/sewingmachinepuzzle.h"
@@ -768,6 +769,10 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 
 		return new SafeDialPuzzle();
 	case 211:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			return new ScopaPuzzle();
+		}
+
 		return new CollisionPuzzle(CollisionPuzzle::PuzzleType::kCollision);
 	case 212:
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kOrderItems);
