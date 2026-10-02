@@ -57,6 +57,7 @@
 #include "engines/nancy/action/puzzle/drivingpuzzle.h"
 #include "engines/nancy/action/puzzle/dropsortpuzzle.h"
 #include "engines/nancy/action/puzzle/escapegridpuzzle.h"
+#include "engines/nancy/action/puzzle/electrosensorspuzzle.h"
 #include "engines/nancy/action/puzzle/gridmappuzzle.h"
 #include "engines/nancy/action/puzzle/magicboxpuzzle.h"
 #include "engines/nancy/action/puzzle/matchpuzzle.h"
@@ -703,6 +704,13 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 		if (g_nancy->getGameType() >= kGameTypeNancy16) {
 			// "Quiz Puzzle": the office laptop password box (S2929)
 			return new LaptopPasswordPuzzle();
+		}
+
+		return nullptr;
+	case 190:	// Nancy16
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Override Lock Puzzle": the Electro Sensors lever panel (S3890-S3893)
+			return new ElectroSensorsPuzzle();
 		}
 
 		return nullptr;
