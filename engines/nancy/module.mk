@@ -38,6 +38,7 @@ MODULE_OBJS = \
   action/puzzle/cuttingpuzzle.o \
   action/puzzle/decoderpuzzle.o \
   action/puzzle/dotconnectpuzzle.o \
+  action/puzzle/draggableimagepuzzle.o \
   action/puzzle/drivingpuzzle.o \
   action/puzzle/dropsortpuzzle.o \
   action/puzzle/escapegridpuzzle.o \

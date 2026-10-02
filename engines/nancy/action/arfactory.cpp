@@ -54,6 +54,7 @@
 #include "engines/nancy/action/puzzle/cuttingpuzzle.h"
 #include "engines/nancy/action/puzzle/decoderpuzzle.h"
 #include "engines/nancy/action/puzzle/dotconnectpuzzle.h"
+#include "engines/nancy/action/puzzle/draggableimagepuzzle.h"
 #include "engines/nancy/action/puzzle/drivingpuzzle.h"
 #include "engines/nancy/action/puzzle/dropsortpuzzle.h"
 #include "engines/nancy/action/puzzle/escapegridpuzzle.h"
@@ -741,6 +742,11 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 206:
 		return new RaycastPuzzle();
 	case 207:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Draggable Image with Action Zones": the microdot viewer
+			return new DraggableImagePuzzle();
+		}
+
 		return new TangramPuzzle();
 	case 208:
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kPiano);
