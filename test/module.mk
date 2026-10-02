@@ -33,6 +33,10 @@ TEST_LIBS += test/system/null_osystem.o \
 	backends/platform/sdl/win32/win32_wrapper.o
 endif
 
+ifdef USE_FREETYPE2
+TESTS += $(srcdir)/test/graphics/ttf.h
+endif
+
 ifdef USE_TINYGL
 TESTS += $(srcdir)/test/graphics/tinygl*.h
 endif

@@ -649,9 +649,12 @@ static void renderGlyph(uint8 *dstPos, const int dstPitch, const uint8 *srcPos,
 				double dAn = (double)dA / 255.0;
 				double oAn = sAn + dAn * (1.0 - sAn);
 
-				dR = static_cast<uint8>(sR * sAn + dR * dAn * (1.0 - sAn) / oAn);
-				dG = static_cast<uint8>(sG * sAn + dG * dAn * (1.0 - sAn) / oAn);
-				dB = static_cast<uint8>(sB * sAn + dB * dAn * (1.0 - sAn) / oAn);
+				// Store straight RGB: normalize both contributions by the output
+				// alpha. Normalizing only the destination darkens antialiased
+				// edges when the surface is subsequently composited.
+				dR = static_cast<uint8>((sR * sAn + dR * dAn * (1.0 - sAn)) / oAn);
+				dG = static_cast<uint8>((sG * sAn + dG * dAn * (1.0 - sAn)) / oAn);
+				dB = static_cast<uint8>((sB * sAn + dB * dAn * (1.0 - sAn)) / oAn);
 				dA = static_cast<uint8>(oAn * 255.0);
 
 				*rDst = dstFormat.ARGBToColor(dA, dR, dG, dB);
@@ -1066,7 +1069,7 @@ Font *findTTFace(const Common::Array<Common::Path> &files, const Common::U32Stri
 			continue;
 		}
 
-		FT_StreamRec_ stream;
+		FT_StreamRec_ stream = {};
 		FT_Face face;
 
 		// Load face index -1 to get the count
@@ -1080,6 +1083,9 @@ Font *findTTFace(const Common::Array<Common::Path> &files, const Common::U32Stri
 		g_ttf.closeFont(face);
 
 		for (FT_Long i = 0; i < num_faces; i++) {
+			// The preceding probe may leave the stream inside the file. Each
+			// face must see the complete font, including its header.
+			ttfFile->seek(0);
 			if (!g_ttf.loadFont(ttfFile, &stream, i, face)) {
 				continue;
 			}
@@ -1142,6 +1148,7 @@ Font *findTTFace(const Common::Array<Common::Path> &files, const Common::U32Stri
 		ydpi = xdpi;
 	}
 
+	bestTTFFile->seek(0);
 	if (!font->load(bestTTFFile, DisposeAfterUse::YES, size, sizeMode, xdpi, ydpi,
 	                renderMode, mapping, false, bestFaceId, bold, italic)) {
 		delete font;
