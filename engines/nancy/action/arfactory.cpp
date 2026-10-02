@@ -54,6 +54,7 @@
 #include "engines/nancy/action/puzzle/cubepuzzle.h"
 #include "engines/nancy/action/puzzle/cuttingpuzzle.h"
 #include "engines/nancy/action/puzzle/decoderpuzzle.h"
+#include "engines/nancy/action/puzzle/dancepuzzle.h"
 #include "engines/nancy/action/puzzle/dotconnectpuzzle.h"
 #include "engines/nancy/action/puzzle/draggableimagepuzzle.h"
 #include "engines/nancy/action/puzzle/drivingpuzzle.h"
@@ -792,6 +793,11 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 
 		return new CollisionPuzzle(CollisionPuzzle::PuzzleType::kTileMove);
 	case 214:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Dance Audition"
+			return new DancePuzzle();
+		}
+
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kKeypad);
 	case 215:
 		return new MazeChasePuzzle();
