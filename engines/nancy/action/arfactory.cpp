@@ -71,6 +71,7 @@
 #include "engines/nancy/action/puzzle/mindpuzzle.h"
 #include "engines/nancy/action/puzzle/minigolfpuzzle.h"
 #include "engines/nancy/action/puzzle/mirrorlightpuzzle.h"
+#include "engines/nancy/action/puzzle/mosaicpuzzle.h"
 #include "engines/nancy/action/puzzle/mouselightpuzzle.h"
 #include "engines/nancy/action/puzzle/multibuildpuzzle.h"
 #include "engines/nancy/action/puzzle/necklacepuzzle.h"
@@ -671,7 +672,10 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 180:
 		return new BlockingPuzzle();
 	case 181:
-		return new PaintPuzzle();
+		if (g_nancy->getGameType() >= kGameTypeNancy16)
+			return new MosaicPuzzle();
+		else
+			return new PaintPuzzle();
 	case 182:
 		return new DecoderPuzzle();
 	// -- Nancy15 new puzzles (types 183-185) --

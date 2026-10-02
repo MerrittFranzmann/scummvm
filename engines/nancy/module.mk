@@ -56,6 +56,7 @@ MODULE_OBJS = \
   action/puzzle/mindpuzzle.o \
   action/puzzle/minigolfpuzzle.o \
   action/puzzle/mirrorlightpuzzle.o \
+  action/puzzle/mosaicpuzzle.o \
   action/puzzle/mouselightpuzzle.o \
   action/puzzle/multibuildpuzzle.o \
   action/puzzle/necklacepuzzle.o \
