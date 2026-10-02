@@ -63,6 +63,7 @@
 #include "engines/nancy/action/puzzle/hangmanpuzzle.h"
 #include "engines/nancy/action/puzzle/lettergridpuzzle.h"
 #include "engines/nancy/action/puzzle/leverpuzzle.h"
+#include "engines/nancy/action/puzzle/lockpickpuzzle.h"
 #include "engines/nancy/action/puzzle/magnetmazepuzzle.h"
 #include "engines/nancy/action/puzzle/mazechasepuzzle.h"
 #include "engines/nancy/action/puzzle/memorypuzzle.h"
@@ -646,7 +647,10 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 		else
 			return new WordFindPuzzle();
 	case 171:
-		return new TurningPuzzle();	// Moved from 209
+		if (g_nancy->getGameType() >= kGameTypeNancy16)
+			return new LockPickPuzzle();
+		else
+			return new TurningPuzzle();	// Moved from 209
 	case 172:
 		return new BlocksPuzzle();
 	case 173:
