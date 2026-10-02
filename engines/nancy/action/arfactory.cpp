@@ -78,6 +78,7 @@
 #include "engines/nancy/action/puzzle/overridelockpuzzle.h"
 #include "engines/nancy/action/puzzle/pachinkopuzzle.h"
 #include "engines/nancy/action/puzzle/paintpuzzle.h"
+#include "engines/nancy/action/puzzle/paperdollpuzzle.h"
 #include "engines/nancy/action/puzzle/passwordpuzzle.h"
 #include "engines/nancy/action/puzzle/peepholepuzzle.h"
 #include "engines/nancy/action/puzzle/pegspuzzle.h"
@@ -628,8 +629,10 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 166:
 		if (g_nancy->getGameType() <= kGameTypeNancy13)
 			return new OneBuildPuzzle();	// Moved from 234
-		else
+		else if (g_nancy->getGameType() <= kGameTypeNancy15)
 			return new BuildPuzzle();
+		else
+			return new PaperDollPuzzle();
 	case 167:
 		return new DrivingPuzzle(DrivingPuzzle::kChase);
 	case 168:
