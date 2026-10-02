@@ -127,6 +127,107 @@ protected:
 	PhoneType _phoneType;
 };
 
+// AR 157 in Nancy16. A cut-down Telephone with only the keypad, the numbers
+// and an event flag per number; everything that happens after a number
+// connects is done by sibling records keyed on that flag.
+//
+//   uint16     digits in a phone number
+//   uint16     unknown
+//   float      unknown
+//   float      unknown
+//   uint16     number count
+//     per number, 43 bytes:
+//       char[33] the number
+//       int16    event flag, and its byte value
+//       uint16   scene
+//       uint16   frame
+//       int16    event flag, and its byte value
+//   uint16     unknown
+//   char[33]   keypad atlas, the lit face of each button
+//   float      unknown
+//   uint16     button count
+//     per button, 76 bytes:
+//       byte     the character it dials, ASCII
+//       RECT     source in the atlas
+//       RECT     destination in the viewport
+//       group    the sound it makes
+//   uint16     prefix count
+//   char[33]   dialling prefix
+//   int32      digits after the prefix, twice
+//   uint16     reload scene, + frame/flag/value
+//   group      dial tone
+//   uint16     action zone count, + 23 bytes each
+//
+// An empty number is what a wrong number connects to.
+class Nancy16Telephone : public RenderActionRecord {
+public:
+	Nancy16Telephone() : RenderActionRecord(7) {}
+	virtual ~Nancy16Telephone() {}
+
+	void init() override;
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+	void handleInput(NancyInput &input) override;
+
+	bool isViewportRelative() const override { return true; }
+
+protected:
+	Common::String getRecordTypeName() const override { return "Nancy16Telephone"; }
+	Common::String getRecordExtraInfo() const override;
+
+	struct Button {
+		char label = 0;
+		Common::Rect src;
+		Common::Rect dest;
+		SoundDescription sound;
+	};
+
+	struct Call {
+		Common::String number;
+		FlagDescription flagA;
+		SceneChangeDescription scene;
+		FlagDescription flagB;
+	};
+
+	struct Zone {
+		Common::Rect hotspot;
+		uint16 cursorType = 0;
+		SceneChangeDescription scene;
+		FlagDescription flag;
+	};
+
+	int buttonAtCursor(const Common::Point &mousePos) const;
+	int zoneAtCursor(const Common::Point &mousePos) const;
+
+	// Index of the number `_dialled` has completed, or -1
+	int matchedCall() const;
+
+	void press(uint button);
+	void redraw();
+
+	// -- File data --
+	uint16 _numberLength = 0;
+	Common::Array<Call> _calls;
+	Common::Path _imageName;
+	Common::Array<Button> _buttons;
+	Common::String _prefix;
+	SceneChangeWithFlag _reloadScene;
+	SoundDescription _dialTone;
+	Common::Array<Zone> _zones;
+
+	// -- Runtime state --
+	Graphics::ManagedSurface _image;
+	Common::String _dialled;
+	int _litButton = -1;
+	uint32 _litUntil = 0;
+	bool _dialTonePlaying = false;
+	bool _connected = false;
+	bool _zoneRequested = false;
+	SceneChangeDescription _pendingScene;
+	FlagDescription _pendingFlag;
+};
+
 } // End of namespace Action
 } // End of namespace Nancy
 

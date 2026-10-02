@@ -588,6 +588,11 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 156:	// Nancy11
 		return new Update3DSound();
 	case 157:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Telephone", with a record the Telephone class does not read
+			return new Nancy16Telephone();
+		}
+
 		return new PlaySoundCC();
 	case 158:
 		return new PlayRandomSound();
