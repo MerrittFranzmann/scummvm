@@ -38,6 +38,7 @@
 #include "engines/nancy/sound.h"
 #include "engines/nancy/graphics.h"
 #include "engines/nancy/console.h"
+#include "engines/nancy/ndui.h"
 #include "engines/nancy/util.h"
 
 #include "engines/nancy/action/conversation.h"
@@ -57,6 +58,10 @@ namespace Nancy {
 
 NancyEngine *g_nancy;
 
+const char *const kConfMatteColour	= "nancy_matte_colour";
+const char *const kConfFontScale	= "nancy_font_scale";
+const char *const kConfWindowMode	= "nancy_window_mode";
+
 NancyEngine::NancyEngine(OSystem *syst, const NancyGameDescription *gd) :
 		Engine(syst),
 		_gameDescription(gd),
@@ -67,6 +72,11 @@ NancyEngine::NancyEngine(OSystem *syst, const NancyGameDescription *gd) :
 		_true(gd->gameType <= kGameTypeNancy2 ? 2 : 1) {
 
 	g_nancy = this;
+
+	// Register defaults, since 0 is a meaningful COLR id and an invalid font scale
+	ConfMan.registerDefault(kConfMatteColour, kDefaultMatteColourID);
+	ConfMan.registerDefault(kConfFontScale, kDefaultFontScalePercent);
+	ConfMan.registerDefault(kConfWindowMode, 1);	// windowed
 
 	_randomSource = new Common::RandomSource("Nancy");
 	_randomSource->setSeed(Common::RandomSource::generateNewSeed());
@@ -156,6 +166,181 @@ bool NancyEngine::canSaveGameStateCurrently(Common::U32String *msg) {
 void NancyEngine::secondChance() {
 	uint secondChanceSlot = getMetaEngine()->getMaximumSaveSlot();
 	saveGameState(secondChanceSlot, "SECOND CHANCE", true);
+}
+
+// Nancy16 checkpoint saves are addressed by name. They live in a reserved band
+// of slots directly below the second chance slot, and a name is mapped to the
+// slot whose description matches it, or else to the first free slot in the band.
+int NancyEngine::firstNamedSaveSlot() const {
+	const int lastSlot = getMetaEngine()->getMaximumSaveSlot() - 1;
+	return MAX<int>(0, lastSlot - kNumNamedSaveSlots + 1);
+}
+
+int NancyEngine::getNamedSaveSlot(const Common::String &name) const {
+	const int secondChanceSlot = getMetaEngine()->getMaximumSaveSlot();
+	const int lastSlot = secondChanceSlot - 1;
+	const int firstSlot = MAX<int>(0, lastSlot - kNumNamedSaveSlots + 1);
+
+	SaveStateList saves = getMetaEngine()->listSaves(_targetName.c_str());
+
+	// Occupied slots in the band are skipped, unless they hold this name
+	Common::Array<bool> taken(kNumNamedSaveSlots);
+	for (const SaveStateDescriptor &save : saves) {
+		const int slot = save.getSaveSlot();
+		if (slot < firstSlot || slot > lastSlot) {
+			continue;
+		}
+
+		if (save.getDescription().equalsIgnoreCase(name)) {
+			return slot;
+		}
+
+		taken[slot - firstSlot] = true;
+	}
+
+	for (int slot = firstSlot; slot <= lastSlot; ++slot) {
+		if (!taken[slot - firstSlot]) {
+			return slot;
+		}
+	}
+
+	return -1;
+}
+
+// Names are matched case-insensitively, since some records load "start_game"
+// while all of them save "Start_Game".
+int NancyEngine::findNamedSaveSlot(const Common::String &name) const {
+	const int secondChanceSlot = getMetaEngine()->getMaximumSaveSlot();
+	const int lastSlot = secondChanceSlot - 1;
+	const int firstSlot = MAX<int>(0, lastSlot - kNumNamedSaveSlots + 1);
+
+	SaveStateList saves = getMetaEngine()->listSaves(_targetName.c_str());
+	for (const SaveStateDescriptor &save : saves) {
+		const int slot = save.getSaveSlot();
+		if (slot >= firstSlot && slot <= lastSlot && save.getDescription().equalsIgnoreCase(name)) {
+			return slot;
+		}
+	}
+
+	return -1;
+}
+
+void NancyEngine::saveNamedGame(const Common::String &name) {
+	if (name.empty()) {
+		warning("Named save requested with an empty name, ignoring");
+		return;
+	}
+
+	if (!canSaveGameStateCurrently()) {
+		warning("Named save '%s' skipped: the engine cannot save right now", name.c_str());
+		return;
+	}
+
+	const int slot = getNamedSaveSlot(name);
+	if (slot < 0) {
+		warning("Named save '%s' skipped: no free slot in the reserved band", name.c_str());
+		return;
+	}
+
+	// Marked as an autosave so the player is warned before overwriting it
+	const Common::Error err = saveGameState(slot, name, true);
+	if (err.getCode() != Common::kNoError) {
+		warning("Named save '%s' to slot %d failed: %s", name.c_str(), slot, err.getDesc().c_str());
+		return;
+	}
+
+	debugC(1, kDebugEngine, "Named save '%s' written to slot %d", name.c_str(), slot);
+}
+
+void NancyEngine::requestNamedLoad(const Common::String &name) {
+	if (name.empty()) {
+		warning("Named load requested with an empty name, ignoring");
+		return;
+	}
+
+	// Last request wins
+	_pendingNamedLoad = name;
+	_namedLoadWasDeferred = false;
+}
+
+void NancyEngine::requestSlotLoad(int slot) {
+	if (slot < 0 || slot > getMetaEngine()->getMaximumSaveSlot()) {
+		warning("Slot load requested for out-of-range slot %d, ignoring", slot);
+		return;
+	}
+
+	_pendingSlotLoad = slot;
+}
+
+void NancyEngine::runPendingNamedLoad() {
+	// A load requested by the player cancels any load queued by a record
+	if (_pendingSlotLoad >= 0) {
+		const int slot = _pendingSlotLoad;
+		_pendingSlotLoad = -1;
+		_pendingNamedLoad.clear();
+		_namedLoadWasDeferred = false;
+
+		const Common::Error err = loadGameState(slot);
+		if (err.getCode() != Common::kNoError) {
+			warning("Load from slot %d failed: %s", slot, err.getDesc().c_str());
+			return;
+		}
+
+		return;
+	}
+
+	if (_pendingNamedLoad.empty()) {
+		return;
+	}
+
+	const Common::String name = _pendingNamedLoad;
+
+	const int slot = findNamedSaveSlot(name);
+	if (slot < 0) {
+		// The checkpoint was never written, e.g. when starting from a late scene
+		warning("Named load '%s' skipped: no save by that name", name.c_str());
+		_pendingNamedLoad.clear();
+		return;
+	}
+
+	if (!canLoadGameStateCurrently()) {
+		// Keep the load pending rather than dropping it. The second chance screens
+		// play a movie on entry, which blocks loading until it ends.
+		if (!_namedLoadWasDeferred) {
+			_namedLoadWasDeferred = true;
+			debugC(1, kDebugEngine, "Named load '%s' held: the engine cannot load yet", name.c_str());
+		}
+
+		return;
+	}
+
+	_pendingNamedLoad.clear();
+	_namedLoadWasDeferred = false;
+
+	debugC(1, kDebugEngine, "Named load '%s' from slot %d", name.c_str(), slot);
+
+	const Common::Error err = loadGameState(slot);
+	if (err.getCode() != Common::kNoError) {
+		warning("Named load '%s' from slot %d failed: %s", name.c_str(), slot, err.getDesc().c_str());
+		return;
+	}
+}
+
+void NancyEngine::deleteNamedGame(const Common::String &name) {
+	if (name.empty()) {
+		warning("Named save deletion requested with an empty name, ignoring");
+		return;
+	}
+
+	const int slot = findNamedSaveSlot(name);
+	if (slot < 0) {
+		// Normal on a first playthrough, since the record fires unconditionally
+		debugC(1, kDebugEngine, "Named save '%s' not present, nothing to clear", name.c_str());
+		return;
+	}
+
+	getMetaEngine()->removeSaveState(_targetName.c_str(), slot);
+	debugC(1, kDebugEngine, "Named save '%s' cleared from slot %d", name.c_str(), slot);
 }
 
 void NancyEngine::errorString(const char *buf_input, char *buf_output, int buf_output_size) {
@@ -370,9 +555,23 @@ const Common::String NancyEngine::getEventFlagName(uint flagID) const {
 	// EVNT chunk and renumbered from 2000, while the engine's generic flags kept
 	// their 1xxx numbering
 	if (flagID >= 2000) {
+		const EVNT *evnt = dynamic_cast<const EVNT *>(getEngineData("EVNT"));
+
+		if (getGameType() >= kGameTypeNancy16) {
+			// Nancy16 prepends a block of inventory flags numbered from 0, so an
+			// entry's position no longer implies its ID - look it up instead.
+			for (uint i = 0; i < evnt->eventFlagIDs.size(); ++i) {
+				if (evnt->eventFlagIDs[i] == flagID) {
+					return evnt->eventFlagNames[i];
+				}
+			}
+
+			return "";
+		}
+
 		flagID -= 2000;
 
-		const Common::Array<Common::String> &flagNames = dynamic_cast<const EVNT *>(getEngineData("EVNT"))->eventFlagNames;
+		const Common::Array<Common::String> &flagNames = evnt->eventFlagNames;
 		return (flagID < flagNames.size()) ? flagNames[flagID] : "";
 	}
 
@@ -400,8 +599,18 @@ void NancyEngine::setState(NancyState::NancyState state, NancyState::NancyState 
 		bootGameEngine();
 		setState(NancyState::kLogo);
 		return;
+	case NancyState::kLogo:
+		// Nancy16+ has no logo images in BOOT; the splash is a video played by the scenes
+		if (getGameType() >= kGameTypeNancy16 && !getEngineData("LG0")) {
+			setState(NancyState::kScene);
+			return;
+		}
+
+		break;
 	case NancyState::kMainMenu: {
-		if (!ConfMan.hasKey("original_menus") || ConfMan.getBool("original_menus")) {
+		// Nancy16+ has no MENU chunk, so fall back to the ScummVM menu
+		if (getEngineData("MENU") &&
+			(!ConfMan.hasKey("original_menus") || ConfMan.getBool("original_menus"))) {
 			break;
 		}
 
@@ -476,6 +685,9 @@ Common::Error NancyEngine::run() {
 		if (shouldQuit()) {
 			break;
 		}
+
+		// Loads queued during the previous frame, run while no scene code is on the stack
+		runPendingNamedLoad();
 
 		uint32 frameEndTime = _system->getMillis() + 16;
 
@@ -587,6 +799,10 @@ void NancyEngine::bootGameEngine() {
 	SearchMan.addSubDirectoryMatching(gameDataDir, "cdsound");
 	SearchMan.addSubDirectoryMatching(gameDataDir, "hdvideo");
 	SearchMan.addSubDirectoryMatching(gameDataDir, "cdvideo");
+	// Nancy16+ uses sound/, video/ and video2/ instead of the hd/cd split
+	SearchMan.addSubDirectoryMatching(gameDataDir, "sound");
+	SearchMan.addSubDirectoryMatching(gameDataDir, "video");
+	SearchMan.addSubDirectoryMatching(gameDataDir, "video2");
 	SearchMan.addSubDirectoryMatching(gameDataDir, "iff");
 	SearchMan.addSubDirectoryMatching(gameDataDir, "art");
 	SearchMan.addSubDirectoryMatching(gameDataDir, "font");
@@ -733,16 +949,58 @@ void NancyEngine::bootGameEngine() {
 	LOAD_BOOT(LDSN)	// Player-character "Design Select" screen layout
 
 	// Nancy 16
-	// Only BSUM, PCUI, LVLN, PCAL, LGx, LOAD, CURS, VIEW and MMIX are left in BOOT.
 	// The LDSN chunk has been removed along with the player-character switcher, and
 	// everything else has moved into the per-character CIF tree, where the popup UI
-	// is now described by one IFF per widget instead of a chunk per widget.
+	// is now described by one IFF per widget instead of a chunk per widget. In
+	// nancy18, LVLN and MMIX are merged into ENVS, which also names each
+	// environment's ambient sound.
+	LOAD_BOOT(ENVS)
 
 	_cursor->init(iff->getChunkStream("CURS"));
 
 	_graphics->init();
 
-	if (getGameType() <= kGameTypeNancy9) {
+	if (getGameType() >= kGameTypeNancy16) {
+		// Nancy16 has FONT chunks naming real typefaces instead of glyph atlases,
+		// followed by COLR palette chunks. Neither has a count field.
+		IFF *fontIFF = _resource->loadIFF("font");
+		if (!fontIFF) {
+			error("Failed to load font IFF");
+		}
+
+		FontRegistry *reg = new FontRegistry();
+		for (uint i = 0; ; ++i) {
+			Common::SeekableReadStream *fc = fontIFF->getChunkStream("FONT", i);
+			if (!fc) {
+				break;
+			}
+
+			reg->readFontChunk(*fc);
+			delete fc;
+		}
+
+		for (uint i = 0; ; ++i) {
+			Common::SeekableReadStream *cc = fontIFF->getChunkStream("COLR", i);
+			if (!cc) {
+				break;
+			}
+
+			reg->readColourChunk(*cc);
+			delete cc;
+		}
+
+		delete fontIFF;
+		_engineData.setVal("FONTREG", reg);
+
+		// Apply the saved font scale
+		_ttfFonts.init(reg, (uint)ConfMan.getInt(kConfFontScale));
+
+		// Apply the saved matte colour, a COLR id
+		if (const FontRegistry::ColourEntry *colour =
+				reg->findColourByID((uint32)ConfMan.getInt(kConfMatteColour))) {
+			_graphics->setMatteColour(colour->argb[kNDUIColorNormal]);
+		}
+	} else if (getGameType() <= kGameTypeNancy9) {
 		_graphics->loadFonts(iff->getChunkStream("FONT"));
 	} else {
 		IFF *fontIFF = _resource->loadIFF("font");
@@ -760,12 +1018,62 @@ void NancyEngine::bootGameEngine() {
 	delete iff;
 
 	if (getGameType() >= kGameTypeNancy15) {
-		// The default player character is Nancy, who always occupies the first PCUI slot
-		setPlayerCharacter(0);
+		if (getGameType() >= kGameTypeNancy16) {
+			const PCUI *pcui = GetEngineData(PCUI);
+
+			if (!pcui) {
+				error("Nancy16 and newer need a PCUI chunk to name the player-character trees");
+			}
+
+			if (pcui->characters.empty()) {
+				error("The PCUI chunk lists no player characters");
+			}
+
+			// PCUI names the per-character CIF trees, so they can only be opened now
+			for (const PCUI::Character &chr : pcui->characters) {
+				if (!chr.imageName.empty()) {
+					_resource->readCifTree(chr.imageName, "dat", 1);
+				}
+			}
+
+			// The default character is Nancy, whose boot chunks are in PUI_CRE_NANCY_DEFAULT_BOOT
+			iff = _resource->loadIFF(Common::Path(pcui->characters[0].defaultImageName + "_boot"));
+
+			if (!iff) {
+				error("Failed to load player-character boot chunks for '%s'",
+					pcui->characters[0].defaultImageName.c_str());
+			}
+
+			// Most of these are absent in Nancy16, whose UI is described by NDUI files instead
+			LOAD_BOOT(TASK)
+			LOAD_BOOT(UIIV)
+			LOAD_BOOT(UICO)
+			LOAD_BOOT(UICL)
+			LOAD_BOOT(UIBW)
+			LOAD_BOOT(UINB)
+			LOAD_BOOT(SCTB)
+			LOAD_BOOT(UIRC)
+			LOAD_BOOT(UICM)
+			LOAD_BOOT(PUIH)	// Player-UI header (theme name + swatch image)
+			LOAD_BOOT(PUIV)	// Player-UI random-sound bank ("can't" responses)
+			delete iff;
+
+			// PUIH names the string table holding the UI captions and tooltips
+			auto *puih = (const PUIH *)getEngineData("PUIH");
+			if (puih && !puih->textTableName.empty()) {
+				LOAD_CHUNK(puih->textTableName.c_str(), CVTX, "CVTX", "UITEXT")
+			}
+		} else {
+			// The default player character is Nancy, who always occupies the first PCUI slot
+			setPlayerCharacter(0);
+		}
 	}
 
 	if (getGameType() >= kGameTypeNancy12) {
 		LOAD_CHUNK("FLAGS", EVNT, "EVNT", "EVNT")
+
+		// The inventory table moved out of BOOT into its own member in Nancy16.
+		LOAD_CHUNK("INVENTORY", INVD, "INVD", "INVD")
 
 		// The total number of event flags is the 1000 generic flags plus the
 		// game-specific flags listed in the EVNT chunk, so compute it from the
@@ -787,7 +1095,7 @@ void NancyEngine::bootGameEngine() {
 	#undef LOAD_BOOT_L
 	#undef LOAD_BOOT
 
-	if (getGameType() >= kGameTypeNancy16) {
+	if (getGameType() >= kGameTypeNancy16 && getGameType() < kGameTypeNancy18) {
 		error("Game not supported; Use console to inspect game data");
 	}
 }
@@ -951,6 +1259,11 @@ void NancyEngine::populateStaticData() {
 		_staticData.numItems = 49;
 		_staticData.numCursorTypes = 45;
 		break;
+	case kGameTypeNancy18:
+		_staticData.numItems = 48;
+		// Derived from the CURS chunk size
+		_staticData.numCursorTypes = 46;
+		break;
 	default:
 		_staticData.numItems = 50;
 		_staticData.numCursorTypes = 37;
@@ -958,15 +1271,23 @@ void NancyEngine::populateStaticData() {
 	}
 
 	// Generic event flags occupy labels 1010-1040 (indices 10-40), or 1010-1060
-	// (indices 10-60) in Nancy15, and are cleared on every scene change. The
-	// won-game flag is label 1042 (index 42). numEventFlags is computed from the
-	// EVNT chunk later in bootGameEngine; this is just a fallback if it is absent.
+	// (indices 10-60) in Nancy15, and are cleared on every scene change. Nancy16
+	// stores them by label rather than by index, and uses labels 1010-1059.
+	// numEventFlags is computed from the EVNT chunk later in bootGameEngine; this
+	// is just a fallback if it is absent.
 	_staticData.numEventFlags = kNumGenericEventFlags;
-	_staticData.genericEventFlags.resize(getGameType() >= kGameTypeNancy15 ? 51 : 31);
-	for (uint i = 0; i < _staticData.genericEventFlags.size(); ++i) {
-		_staticData.genericEventFlags[i] = 10 + i;
+	const uint16 genericBase = getGameType() >= kGameTypeNancy16 ? 1010 : 10;
+	if (getGameType() >= kGameTypeNancy16) {
+		_staticData.genericEventFlags.resize(50);
+	} else {
+		_staticData.genericEventFlags.resize(getGameType() >= kGameTypeNancy15 ? 51 : 31);
 	}
-	_staticData.wonGameFlagID = 42;
+	for (uint i = 0; i < _staticData.genericEventFlags.size(); ++i) {
+		_staticData.genericEventFlags[i] = genericBase + i;
+	}
+
+	// Nancy16 has no known won-game flag; label 1042 is an ordinary generic flag there
+	_staticData.wonGameFlagID = getGameType() >= kGameTypeNancy16 ? -1 : 42;
 	_staticData.logoEndAfter = 4000;
 
 	// Sound channel layout, unchanged since Nancy3
@@ -976,6 +1297,12 @@ void NancyEngine::populateStaticData() {
 	sci.speechChannels = { 12, 13, 30 };
 	sci.musicChannels = { 0, 1, 2, 3, 19, 26, 27, 29 };
 	sci.sfxChannels = { 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 22, 23, 24, 25, 31 };
+
+	if (getGameType() >= kGameTypeNancy16) {
+		// Nancy16+ also plays speech on channels 24 and 25
+		sci.speechChannels = { 12, 13, 24, 25, 30 };
+		sci.sfxChannels = { 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 22, 23, 31 };
+	}
 }
 
 Common::Error NancyEngine::synchronize(Common::Serializer &ser) {

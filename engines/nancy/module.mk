@@ -7,6 +7,7 @@ MODULE_OBJS = \
   action/arfactory.o \
   action/autotext.o \
   action/cameraaction.o \
+  action/collectionrecords.o \
   action/datarecords.o \
   action/inventoryrecords.o \
   action/navigationrecords.o \
@@ -19,6 +20,7 @@ MODULE_OBJS = \
   action/secondarymovie.o \
   action/secondaryvideo.o \
   action/puzzle/adjustpuzzle.o \
+  action/textscroll16.o \
   action/puzzle/angletosspuzzle.o \
   action/puzzle/arcadepuzzle.o \
   action/puzzle/assemblypuzzle.o \
@@ -131,11 +133,15 @@ MODULE_OBJS = \
   input.o \
   metaengine.o \
   nancy.o \
+  ndui.o \
+  nduipanel.o \
+  ttffont.o \
   puzzledata.o \
   renderobject.o \
   resource.o \
   sound.o \
   sound_vorbis.o \
+  streams.o \
   util.o \
   video.o
 

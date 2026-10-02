@@ -130,6 +130,10 @@ public:
 	Math::Vector3d &getOrientation() { return _orientation; }
 	Common::String getChannelInfo(uint16 channelID);
 
+	// Lists the playing channels for debugging, e.g. "6:AMB_Venice*,14:CAS_Door".
+	// A star marks a channel owned by an ambient stream.
+	Common::String describeActiveChannels() const;
+
 	// Used when changing scenes
 	void stopAndUnloadSceneSpecificSounds();
 	void pauseSceneSpecificSounds(bool pause);
@@ -150,6 +154,10 @@ protected:
 		Audio::AudioStream *streamForMixer = nullptr;
 		Audio::SoundHandle handle;
 		bool isPersistent = false;
+
+		// Started by a Nancy16 ambient environment stream (see streams.h), so
+		// not stopped by stopAndUnloadSceneSpecificSounds()
+		bool isAmbient = false;
 
 		// Sound effect data, not applicable to nancy2 and below
 		SoundEffectDescription *effectData = nullptr;

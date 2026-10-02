@@ -143,6 +143,8 @@ struct SortPuzzleData : public PuzzleData {
 	Common::Array<int16> solvedState;
 };
 
+// Match score for the Nancy16 Scopa game (AR 211). Each hand reloads the
+// scene, so the score has to outlive it.
 // Per-magnet (left, top, right, bottom, locked) packed as 5 int16s. The
 // puzzle's two scenes (3280, 3281) are the same puzzle with the same data,
 // so a single flat array suffices.
@@ -169,6 +171,9 @@ struct GridMapPuzzleData : public PuzzleData {
 	Common::Array<int16> itemState;
 };
 
+// Room hand-off in the Nancy16 sentry maze. An AR 168 record names the room
+// and cell to arrive at; the AR 210 record in that room picks them up.
+// An empty pendingLevel means no hand-off is pending.
 struct QuizPuzzleData : public PuzzleData {
 	QuizPuzzleData() {}
 	virtual ~QuizPuzzleData() {}
@@ -545,6 +550,31 @@ struct BuildPuzzleData : public PuzzleData {
 	bool wrongIngredient = false;
 	Common::Array<int16> pieces;	// 6 per piece: sourceID, assignedZone, left, top, right, bottom
 	Common::Array<int16> zones;		// per zone: numWrong, then one count per ingredient
+};
+
+// Nancy16 collections: named, ordered lists of values such as keypad digits.
+// AR 37 declares one, AR 38 appends to it and AR 39 tests it. They persist
+// across scene changes.
+struct CollectionData : public PuzzleData {
+	struct Collection {
+		// Declared by the AR 37 creation record
+		uint32 maxEntries = 0;
+		bool isCharacter = false;
+
+		// Only the array matching isCharacter is used
+		Common::Array<Common::String> strings;
+		Common::Array<double> numbers;
+
+		uint size() const { return isCharacter ? strings.size() : numbers.size(); }
+	};
+
+	CollectionData() {}
+	virtual ~CollectionData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('C', 'O', 'L', 'L'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	Common::HashMap<Common::String, Collection> collections;
 };
 
 PuzzleData *makePuzzleData(const uint32 tag);

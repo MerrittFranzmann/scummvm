@@ -33,7 +33,55 @@ EngineData::EngineData(Common::SeekableReadStream *chunkStream) {
 	chunkStream->seek(0);
 }
 
+// Nancy16 rebuilt BSUM: a 60-byte header, five filenames, a support URL, no
+// UI rects and no font count.
+void BSUM::readNancy16(Common::SeekableReadStream *chunkStream) {
+	chunkStream->seek(0);
+	chunkStream->read(header, 60);
+
+	chunkStream->seek(60);
+	readFilename(*chunkStream, conversationTextsFilename);	// "convo"
+	readFilename(*chunkStream, autotextFilename);			// "autotext"
+	readFilename(*chunkStream, fontFilename);				// "font"
+	readFilename(*chunkStream, flagsFilename);				// "flags"
+	readFilename(*chunkStream, inventoryFilename);			// "inventory"
+
+	chunkStream->seek(225);
+	firstScene.sceneID = chunkStream->readUint16LE();
+	firstScene.frameID = chunkStream->readUint16LE();
+	firstScene.verticalOffset = 0;	// Not present
+	startTimeHours = chunkStream->readUint16LE();
+	startTimeMinutes = chunkStream->readUint16LE();
+
+	chunkStream->seek(242);
+	char urlBuf[33];
+	chunkStream->read(urlBuf, 33);
+	urlBuf[32] = '\0';
+	supportURL = urlBuf;
+
+	chunkStream->seek(498);
+	horizontalEdgesSize = chunkStream->readUint16LE();
+	verticalEdgesSize = chunkStream->readUint16LE();
+
+	// No font count; the FONT chunks are iterated instead
+	numFonts = 0;
+
+	chunkStream->seek(522);
+	playerTimeMinuteLength = chunkStream->readSint16LE();
+	buttonPressTimeDelay = chunkStream->readUint16LE();
+	dayStartMinutes = chunkStream->readUint16LE();
+	dayEndMinutes = chunkStream->readUint16LE();
+	overrideMovementTimeDeltas = chunkStream->readByte();
+	slowMovementTimeDelta = chunkStream->readSint16LE();
+	fastMovementTimeDelta = chunkStream->readSint16LE();
+}
+
 BSUM::BSUM(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		readNancy16(chunkStream);
+		return;
+	}
+
 	Common::Serializer s(chunkStream, nullptr);
 	s.setVersion(g_nancy->getGameType());
 
@@ -148,6 +196,59 @@ BSUM::BSUM(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 			s.syncAsUint16LE(timerDurations[i]);
 		}
 	}
+}
+
+void FontRegistry::readFontChunk(Common::SeekableReadStream &stream) {
+	Entry e;
+	stream.seek(0);
+	e.id = stream.readUint32LE();
+	readFilename(stream, e.alias);
+	readFilename(stream, e.face);
+	e.height = stream.readUint32LE();
+	e.weight = stream.readUint32LE();
+	e.flag = stream.readByte();
+	entries.push_back(e);
+}
+
+void FontRegistry::readColourChunk(Common::SeekableReadStream &stream) {
+	ColourEntry c;
+	stream.seek(0);
+	c.id = stream.readUint32LE();
+	for (uint i = 0; i < 4; ++i) {
+		// Stored big-endian, as A-R-G-B
+		c.argb[i] = stream.readUint32BE();
+	}
+	colours.push_back(c);
+}
+
+const FontRegistry::Entry *FontRegistry::findByAlias(const Common::String &alias) const {
+	for (uint i = 0; i < entries.size(); ++i) {
+		if (entries[i].alias.equalsIgnoreCase(alias)) {
+			return &entries[i];
+		}
+	}
+
+	return nullptr;
+}
+
+const FontRegistry::Entry *FontRegistry::findByID(uint32 id) const {
+	for (uint i = 0; i < entries.size(); ++i) {
+		if (entries[i].id == id) {
+			return &entries[i];
+		}
+	}
+
+	return nullptr;
+}
+
+const FontRegistry::ColourEntry *FontRegistry::findColourByID(uint32 id) const {
+	for (uint i = 0; i < colours.size(); ++i) {
+		if (colours[i].id == id) {
+			return &colours[i];
+		}
+	}
+
+	return nullptr;
 }
 
 VIEW::VIEW(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
@@ -301,6 +402,21 @@ void INV::readNancy15(Common::SeekableReadStream &stream) {
 		readRect(stream, item.sourceRect);
 		item.highlightedSourceRect = item.sourceRect;
 		item.highlightedSourceRect.translate(highlightOffsetX, highlightOffsetY);
+	}
+}
+
+INVD::INVD(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
+	const uint16 count = chunkStream->readUint16LE();
+	items.resize(count);
+
+	for (uint i = 0; i < count; ++i) {
+		Item &item = items[i];
+		item.id = chunkStream->readUint16LE();
+		readFilename(*chunkStream, item.name);
+		item.flags = chunkStream->readUint32LE();
+		readFilename(*chunkStream, item.viewSceneName);
+		chunkStream->skip(2);	// Unknown, always -4
+		readRect(*chunkStream, item.sourceRect);
 	}
 }
 
@@ -1388,10 +1504,13 @@ EVNT::EVNT(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 	const uint16 count = (uint16)(chunkStream->size() / (int64)kEventRecordSize);
 
 	eventFlagNames.resize(count);
+	eventFlagIDs.resize(count);
 
 	for (uint16 i = 0; i < count; ++i) {
 		readFilename(*chunkStream, name);
-		chunkStream->skip(2);	// flag ID (starting from 2000)
+		// Flag ID. Nancy16 prepends inventory flags numbered from 0, so IDs
+		// are no longer implied by position.
+		eventFlagIDs[i] = chunkStream->readUint16LE();
 		eventFlagNames[i] = name;
 	}
 }
@@ -1466,6 +1585,25 @@ MMIX::MMIX(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 	}
 }
 
+ENVS::ENVS(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
+	const uint16 count = chunkStream->readUint16LE();
+	environments.resize(count);
+
+	for (uint16 i = 0; i < count; ++i) {
+		Environment &env = environments[i];
+		readFilename(*chunkStream, env.sceneCode);
+		readFilename(*chunkStream, env.displayName);
+		readFilename(*chunkStream, env.ambientSoundName);
+		chunkStream->skip(33); // Unused, always empty
+
+		const uint16 numTracks = chunkStream->readUint16LE();
+		env.musicNames.resize(numTracks);
+		for (uint16 j = 0; j < numTracks; ++j) {
+			readFilename(*chunkStream, env.musicNames[j]);
+		}
+	}
+}
+
 LVLN::LVLN(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 	// The count is the total number of strings, which always comes in
 	// (code, name) pairs - hence it must be even.
@@ -1481,6 +1619,27 @@ LVLN::LVLN(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 }
 
 PCUI::PCUI(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy18) {
+		// The leading flag byte and the per-entry slot index are gone, the default
+		// character's name was prepended, and every entry now carries the
+		// character's display name ahead of its two image names.
+		readFilename(*chunkStream, defaultCharacterName);
+		readFilename(*chunkStream, uiName);
+
+		const uint16 count = chunkStream->readUint16LE();
+		characters.resize(count);
+
+		for (uint16 i = 0; i < count; ++i) {
+			Character &chr = characters[i];
+			readFilename(*chunkStream, chr.name);
+			readFilename(*chunkStream, chr.imageName);
+			readFilename(*chunkStream, chr.defaultImageName);
+			chr.id = chunkStream->readUint16LE();
+		}
+
+		return;
+	}
+
 	flag = chunkStream->readByte();
 
 	if (g_nancy->getGameType() >= kGameTypeNancy16) {
@@ -1514,6 +1673,16 @@ LDSN::LDSN(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
 }
 
 PUIH::PUIH(Common::SeekableReadStream *chunkStream) : EngineData(chunkStream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy18) {
+		// The leading flag byte is gone and three names were added
+		readFilename(*chunkStream, themeName);
+		readFilename(*chunkStream, swatchImageName);
+		readFilename(*chunkStream, onBecomeDefault);
+		readFilename(*chunkStream, onLeaveDefault);
+		readFilename(*chunkStream, textTableName);
+		return;
+	}
+
 	flag = chunkStream->readByte();
 	readFilename(*chunkStream, themeName);
 	readFilename(*chunkStream, swatchImageName);

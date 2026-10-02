@@ -92,6 +92,8 @@ public:
 		// pick. A roll inside [0, stayWeight) means "don't transition";
 		// instead pause for [minPauseMs, maxPauseMs] before moving on.
 		uint16 stayWeight = 0;
+		// Nancy16: event flag raised when this sequence starts playing
+		int16 raiseFlag = kEvNoEvent;
 		Common::Array<NextSequenceRef> nextSequences;
 		// Every weighted entry takes an equal share of the pick.
 		bool equalChanceNext = false;
@@ -287,7 +289,11 @@ protected:
 	// blt-descriptor lists separated by the recognition movie's name, in place
 	// of Nancy13's secondaryMovie record + hotspot list.
 	void readRandomMovieDataNancy14(Common::Serializer &ser, Common::SeekableReadStream &stream);
+	// Nancy16 (ARs 42 and 43) adds a label and a per-sequence event flag, and
+	// has a single blt-descriptor list with no recognition movie.
+	void readRandomMovieDataNancy16(Common::Serializer &ser, Common::SeekableReadStream &stream);
 	void readRandomSequence(Common::Serializer &ser, RandomSequence &seq);
+	void readNextSequenceRef(Common::Serializer &ser, RandomSequence &seq, NextSequenceRef &next);
 	void readSecondaryRandomMovie(Common::Serializer &ser, RandomSequence &seq);
 
 	// Shared tail of the random-movie readers: pick the starting sequence
@@ -316,6 +322,8 @@ protected:
 	// Apply a RandomSequence's playback config to the PSM flat fields
 	// and reload the decoder. Returns true on success.
 	bool activateRandomSequence(int index);
+	// Raise the event flag a random sequence carries, if it names one.
+	void raiseSequenceFlag(int index);
 
 	// Load & start the recognition (secondary) movie in place of the idle loop.
 	bool activateSecondaryMovie();

@@ -63,6 +63,10 @@ public:
 		return Common::String::format("Value %d -> %d (should set is %d)", _index, _value, _shouldSet);
 	}
 
+	byte getTableIndex() const { return _index; }
+	bool getShouldSet() const { return _shouldSet; }
+	int16 getOperand() const { return _value; }
+
 protected:
 	Common::String getRecordTypeName() const override { return "SetValue"; }
 
@@ -164,6 +168,8 @@ protected:
 };
 
 // Nancy 11+ AR 96. Sets each of a list of event flags to a random boolean value.
+// Nancy16 (AR 92) instead holds a weighted table of { label, value, weight }
+// entries, and exactly one entry is set.
 class RandomizeEventFlags : public ActionRecord {
 public:
 	void readData(Common::SeekableReadStream &stream) override;
@@ -171,8 +177,13 @@ public:
 
 	Common::Array<int16> _flagLabels;
 
+	// Nancy16 only; empty for the older two-byte form
+	Common::Array<byte> _flagValues;
+	Common::Array<uint32> _weights;
+
 protected:
 	Common::String getRecordTypeName() const override { return "RandomizeEventFlags"; }
+	Common::String getRecordExtraInfo() const override;
 };
 
 // Sets the difficulty level for the current save. Only appears at the start of the game.
@@ -209,6 +220,43 @@ public:
 
 protected:
 	Common::String getRecordTypeName() const override;
+};
+
+// Nancy16 journal and task list entries. These live in the JOURNAL_<character>
+// and TASKLIST_<character> scripts, one record per possible entry. They are
+// never executed; Scene::refreshJournal() and refreshTasklist() check their
+// dependencies each time the panel opens.
+
+// Nancy16 type 71: two 33-byte names
+class Nancy16JournalEntry : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override { _isDone = true; }
+
+	// The journal page heading this entry files under, e.g. VENJH1
+	Common::String _page;
+
+	// Key into the AUTOTEXT CVTX table.
+	Common::String _stringID;
+
+protected:
+	Common::String getRecordTypeName() const override { return "Nancy16JournalEntry"; }
+};
+
+// Nancy16 type 72: a 33-byte name and a uint16
+class Nancy16TaskEntry : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override { _isDone = true; }
+
+	// Key into the AUTOTEXT CVTX table.
+	Common::String _stringID;
+
+	// The event flag that marks this task done
+	uint16 _completionFlag = 0;
+
+protected:
+	Common::String getRecordTypeName() const override { return "Nancy16TaskEntry"; }
 };
 
 } // End of namespace Action

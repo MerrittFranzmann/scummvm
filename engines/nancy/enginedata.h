@@ -34,6 +34,9 @@ namespace Nancy {
 
 struct EngineData {
 	EngineData(Common::SeekableReadStream *chunkStream);
+	// For data assembled from several chunks rather than one, as in the Nancy16+
+	// font registry
+	EngineData() {}
 	virtual ~EngineData() {}
 };
 
@@ -41,7 +44,7 @@ struct EngineData {
 struct BSUM : public EngineData {
 	BSUM(Common::SeekableReadStream *chunkStream);
 
-	byte header[90];
+	byte header[90] = {};
 
 	Common::Path conversationTextsFilename;
 	Common::Path autotextFilename;
@@ -49,6 +52,15 @@ struct BSUM : public EngineData {
 	// Nancy12+
 	Common::Path fontFilename;
 	Common::Path flagsFilename;
+
+	// Nancy16+
+	Common::Path inventoryFilename;
+	Common::String supportURL;
+
+private:
+	void readNancy16(Common::SeekableReadStream *chunkStream);
+
+public:
 
 	// Game start section
 	SceneChangeDescription firstScene;
@@ -111,6 +123,37 @@ struct BSUM : public EngineData {
 	Common::Array<uint16> timerDurations;
 };
 
+// Nancy16 replaced the bitmap fonts with a registry naming Windows typefaces.
+// Each FONT chunk is one font; each COLR chunk is a 4-state colour entry.
+struct FontRegistry : public EngineData {
+	struct Entry {
+		uint32 id = 0;
+		Common::String alias;	// e.g. "UIFont", referenced by NDUI descriptors
+		Common::String face;	// e.g. "Tahoma"
+		uint32 height = 0;		// px, LOGFONT lfHeight magnitude
+		uint32 weight = 0;		// LOGFONT lfWeight: 400 normal, 700 bold
+		byte flag = 0;			// nonzero: this font responds to FontScale
+	};
+
+	struct ColourEntry {
+		uint32 id = 0;
+		uint32 argb[4] = {};	// NORMAL, DISABLED, MOUSEOVER/FOCUS, PRESSED
+	};
+
+	FontRegistry() {}
+
+	void readFontChunk(Common::SeekableReadStream &stream);
+	void readColourChunk(Common::SeekableReadStream &stream);
+
+	// These return nullptr when nothing matches
+	const Entry *findByAlias(const Common::String &alias) const;
+	const Entry *findByID(uint32 id) const;	// for <fN> markup
+	const ColourEntry *findColourByID(uint32 id) const;
+
+	Common::Array<Entry> entries;
+	Common::Array<ColourEntry> colours;
+};
+
 // Contains rects defining the in-game viewport
 struct VIEW : public EngineData {
 	VIEW(Common::SeekableReadStream *chunkStream);
@@ -170,6 +213,33 @@ struct INV : public EngineData {
 	Common::String cantText;
 
 	Common::Array<ItemDescription> itemDescriptions;
+};
+
+// Nancy16 inventory table, replacing INV. Found in the INVENTORY member
+// rather than BOOT.
+//   uint16   item count, then per item:
+//   uint16   itemID          matches the INV_* event flag ids
+//   char[33] name
+//   uint32   flags           bit0 keepItem, bit1 has view scene, bit2 pseudo-item
+//   char[33] viewSceneName   e.g. "s6200"
+//   int16    unknown, always -4
+//   RECT     sourceRect      cell in UI_INVENTORY
+struct INVD : public EngineData {
+	struct Item {
+		uint16 id = 0;
+		Common::String name;
+		uint32 flags = 0;
+		Common::String viewSceneName;
+		Common::Rect sourceRect;
+
+		bool keepItem() const { return flags & 1; }
+		bool hasViewScene() const { return flags & 2; }
+		bool isPseudoItem() const { return flags & 4; }
+	};
+
+	INVD(Common::SeekableReadStream *chunkStream);
+
+	Common::Array<Item> items;
 };
 
 // Contains data about the textbox at the bottom left of the game screen
@@ -864,6 +934,7 @@ struct EVNT : public EngineData {
 	static const uint kEventRecordSize = 35;
 
 	Common::Array<Common::String> eventFlagNames;
+	Common::Array<uint16> eventFlagIDs;	// Nancy16+: IDs are no longer implied by position
 };
 
 // UI overlay element table. Introduced in Nancy 12. Each record describes one UI
@@ -922,11 +993,28 @@ struct LVLN : public EngineData {
 	Common::Array<Common::String> levelNames;	// e.g. "Kapu Cave"
 };
 
+// Environment table. Introduced in Nancy 16, replacing LVLN and MMIX: it maps a
+// scene-prefix code to its display name, its ambient sound, and its music
+// playlist, all in a single chunk.
+struct ENVS : public EngineData {
+	struct Environment {
+		Common::String sceneCode;					// e.g. "ALT"
+		Common::String displayName;					// e.g. "Altana"
+		Common::String ambientSoundName;			// e.g. "ALT_Amb_sfx"; empty for UI screens
+		Common::Array<Common::String> musicNames;	// 1-5 entries
+	};
+
+	ENVS(Common::SeekableReadStream *chunkStream);
+
+	Common::Array<Environment> environments;
+};
+
 // Player-character selector UI. Introduced in Nancy 15, where the player
 // alternates between Nancy and the Hardy Boys.
 // Each entry supplies the image names for one selectable character.
 struct PCUI : public EngineData {
 	struct Character {
+		Common::String name;				// Nancy16+ only, e.g. "Nancy"
 		Common::String imageName;			// e.g. "PUI_CRE_Nancy"
 		Common::String defaultImageName;	// e.g. "PUI_CRE_Nancy_Default"
 		uint16 id = 0;
@@ -935,8 +1023,9 @@ struct PCUI : public EngineData {
 	PCUI(Common::SeekableReadStream *chunkStream);
 
 	byte flag = 0;
+	Common::String defaultCharacterName;	// Nancy18, e.g. "Tutor"
 	Common::Path uiName;					// Nancy 16+, e.g. "UI_Main"
-	Common::Array<Character> characters;	// indexed by the on-disk slot byte
+	Common::Array<Character> characters;	// Up to Nancy15, indexed by the on-disk slot byte
 };
 
 // Fixed 314-byte layout block for the Nancy 15 "Design Select" screen, which
@@ -972,7 +1061,11 @@ struct PUIH : public EngineData {
 	Common::String themeName;	// e.g. "Nancy Classic Look (Default)"
 	Common::String swatchImageName;	// e.g. "UI_Swatch_ND"
 
-	// Nancy 16+. Names of the IFFs describing the journal and task list popups
+	// Nancy18
+	Common::String onBecomeDefault;	// callback name, e.g. "OnBecomeDefault"
+	Common::String onLeaveDefault;	// callback name, e.g. "OnLeaveDefault"
+	Common::String textTableName;	// the tree's own CVTX member, e.g. "UI_Text"
+	// Nancy16-17. Names of the IFFs describing the journal and task list popups
 	Common::Path journalPrepName;	// e.g. "Journal_Prep"
 	Common::Path tasklistPrepName;	// e.g. "Tasklist_Prep"
 };

@@ -92,15 +92,21 @@ void Overlay::handleInput(NancyInput &input) {
 }
 
 void Overlay::updateGraphics() {
-	// A static overlay gated by a resource dependency - a Nancy12 gas/tire gauge, one of a
-	// set of sprites each shown for a different resource range - must be visible only while
-	// its dependency currently holds, so track _isActive every frame. This is limited to
-	// resource-gated overlays: ordinary static overlays manage their own per-viewport-frame
-	// visibility in execute() (e.g. appearing only on some frames of a 360 panorama), which
-	// forcing setVisible() here would override.
-	if (g_nancy->getGameType() >= kGameTypeNancy12 && _state == kRun &&
-			_overlayType == kPlayOverlayStatic && hasResourceDependency(_dependencies)) {
-		setVisible(_isActive);
+	if (g_nancy->getGameType() >= kGameTypeNancy12 && _state == kRun && _overlayType == kPlayOverlayStatic) {
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// Nancy16 routinely clears event flags again, so any static overlay can be
+			// hidden by its dependencies. It must also only be shown on viewport frames
+			// that have a blit description for it.
+			setVisible(_isActive && _hasBlitForCurrentFrame);
+		} else if (hasResourceDependency(_dependencies)) {
+			// A static overlay gated by a resource dependency - a Nancy12 gas/tire gauge, one of a
+			// set of sprites each shown for a different resource range - must be visible only while
+			// its dependency currently holds, so track _isActive every frame. This is limited to
+			// resource-gated overlays: ordinary static overlays manage their own per-viewport-frame
+			// visibility in execute() (e.g. appearing only on some frames of a 360 panorama), which
+			// forcing setVisible() here would override.
+			setVisible(_isActive);
+		}
 	}
 
 	// Update inactive animated overlays
@@ -297,6 +303,7 @@ void Overlay::execute() {
 
 				setVisible(false);
 				_hasHotspot = false;
+				_hasBlitForCurrentFrame = false;
 
 				// First, check if there's more than one blit description for the current viewport frame.
 				// This happens in nancy7 scene 3600
@@ -316,6 +323,7 @@ void Overlay::execute() {
 				if (_overlayType == kPlayOverlayStatic && blitsForThisFrame.size()) {
 					moveTo(destRect);
 					setVisible(true);
+					_hasBlitForCurrentFrame = true;
 
 					if (blitsForThisFrame.size() != 1) {
 						_drawSurface.create(destRect.width(), destRect.height(), _fullSurface.format);
@@ -353,15 +361,29 @@ void Overlay::execute() {
 							}
 						}
 
+						Common::Rect blitDest = _blitDescriptions[blitsForThisFrame[i]].dest;
+
 						// Make sure the srcRect doesn't extend beyond the image.
 						// This fixes nancy7 scene 4228
-						srcRect.clip(_fullSurface.getBounds());
+						Common::Rect clippedSrc = srcRect;
+						clippedSrc.clip(_fullSurface.getBounds());
+
+						if (clippedSrc != srcRect) {
+							// Clip the destination by the same amount, or the blit gets stretched.
+							// This fixes nancy18 scene 4460
+							blitDest.left += clippedSrc.left - srcRect.left;
+							blitDest.top += clippedSrc.top - srcRect.top;
+							blitDest.right += clippedSrc.right - srcRect.right;
+							blitDest.bottom += clippedSrc.bottom - srcRect.bottom;
+							srcRect = clippedSrc;
+						}
 
 						if (blitsForThisFrame.size() == 1) {
+							moveTo(blitDest);
 							_drawSurface.create(_fullSurface, srcRect);
 							setTransparent(_transparency >= kPlayOverlayTransparent);
 						} else {
-							Common::Rect d = _blitDescriptions[blitsForThisFrame[i]].dest;
+							Common::Rect d = blitDest;
 							d.translate(-destRect.left, -destRect.top);
 							_drawSurface.blitFrom(_fullSurface, srcRect, d);
 						}
@@ -425,12 +447,26 @@ Common::String Overlay::getRecordTypeName() const {
 
 void OverlayStaticTerse::readData(Common::SeekableReadStream &stream) {
 	readFilename(stream, _imageName);
-	_transparency = stream.readUint16LE();
-	_z = stream.readUint16LE();
 
 	Common::Rect dest, src;
-	readRect(stream, dest);
-	readRect(stream, src);
+	uint16 frameID = 0;
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 swapped z and transparency, inserted a frame ID, and stores the
+		// source rect before the destination
+		_z = stream.readUint16LE();
+		_transparency = stream.readUint16LE();
+
+		// The panorama frame this overlay belongs to
+		frameID = stream.readUint16LE();
+		readRect(stream, src);
+		readRect(stream, dest);
+	} else {
+		_transparency = stream.readUint16LE();
+		_z = stream.readUint16LE();
+		readRect(stream, dest);
+		readRect(stream, src);
+	}
 
 	// The source rect only supplies the top-left offset into the image; the overlay
 	// is blitted 1:1, so the source region takes the destination's dimensions. Using
@@ -440,6 +476,7 @@ void OverlayStaticTerse::readData(Common::SeekableReadStream &stream) {
 
 	_srcRects.push_back(srcRect);
 	_blitDescriptions.resize(1);
+	_blitDescriptions[0].frameID = frameID;
 	_blitDescriptions[0].src = Common::Rect(dest.width(), dest.height());
 	_blitDescriptions[0].dest = dest;
 
@@ -462,6 +499,112 @@ void OverlayMultiframeTerse::readData(Common::SeekableReadStream &stream) {
 	_srcRects.push_back(Common::Rect());
 
 	_overlayType = kPlayOverlayStatic;
+}
+
+void OverlayStaticTinted::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _imageName);
+
+	_z = stream.readUint16LE();
+
+	const uint16 numTints = stream.readUint16LE();
+	_tints.resize(numTints);
+	for (uint i = 0; i < numTints; ++i) {
+		_tints[i].color = stream.readUint32LE();
+		_tints[i].flagLabel = stream.readSint16LE();
+	}
+
+	stream.skip(4);		// Unknown, always 1
+
+	readRect(stream, _srcRect);
+	readRect(stream, _destRect);
+}
+
+int OverlayStaticTinted::pickTint() const {
+	for (uint i = 0; i < _tints.size(); ++i) {
+		if (_tints[i].flagLabel != kEvNoEvent &&
+				NancySceneState.getEventFlag(_tints[i].flagLabel, g_nancy->_true)) {
+			return (int)i;
+		}
+	}
+
+	return -1;
+}
+
+void OverlayStaticTinted::applyTint(int tintID) {
+	Common::Rect src(_destRect.width(), _destRect.height());
+	src.moveTo(_srcRect.left, _srcRect.top);
+	src.clip(Common::Rect(_fullSurface.w, _fullSurface.h));
+
+	if (src.isEmpty()) {
+		return;
+	}
+
+	// Copy rather than reference _fullSurface, since tinting modifies the pixels
+	_drawSurface.free();
+	_drawSurface.create(src.width(), src.height(), _fullSurface.format);
+	_drawSurface.rawBlitFrom(_fullSurface, src, Common::Point());
+
+	if (tintID >= 0 && tintID < (int)_tints.size() && _drawSurface.format.bytesPerPixel == 4) {
+		const uint32 color = _tints[tintID].color;
+		const uint32 tintR = (color >> 24) & 0xff;
+		const uint32 tintG = (color >> 16) & 0xff;
+		const uint32 tintB = (color >> 8) & 0xff;
+		const uint32 transColor = g_nancy->_graphics->getTransColor();
+		const Graphics::PixelFormat &format = _drawSurface.format;
+
+		for (int y = 0; y < _drawSurface.h; ++y) {
+			uint32 *pixel = (uint32 *)_drawSurface.getBasePtr(0, y);
+			for (int x = 0; x < _drawSurface.w; ++x, ++pixel) {
+				if (*pixel == transColor) {
+					continue;
+				}
+
+				byte r, g, b, a;
+				format.colorToARGB(*pixel, a, r, g, b);
+				*pixel = format.ARGBToColor(a, (r * tintR) / 255, (g * tintG) / 255, (b * tintB) / 255);
+			}
+		}
+	}
+
+	setTransparent(true);
+	moveTo(_destRect);
+	_needsRedraw = true;
+	_currentTint = tintID;
+}
+
+void OverlayStaticTinted::init() {
+	g_nancy->_resource->loadImage(_imageName, _fullSurface);
+	applyTint(pickTint());
+	RenderObject::init();
+}
+
+void OverlayStaticTinted::execute() {
+	switch (_state) {
+	case kBegin:
+		init();
+		registerGraphics();
+		_state = kRun;
+		// fall through
+	case kRun:
+		break;
+	default:
+		finishExecution();
+		break;
+	}
+}
+
+void OverlayStaticTinted::updateGraphics() {
+	if (_state != kRun) {
+		return;
+	}
+
+	// Hide the overlay when its dependencies stop being met
+	setVisible(_isActive);
+
+	const int tint = pickTint();
+	if (tint != _currentTint) {
+		applyTint(tint);
+	}
 }
 
 void OverlayAnimTerse::readData(Common::SeekableReadStream &stream) {
@@ -675,6 +818,11 @@ void RolloverOverlay::init() {
 }
 
 void RolloverOverlay::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		readDataNancy16(stream);
+		return;
+	}
+
 	readFilename(stream, _imageName);
 	_transparency = stream.readUint16LE();
 	_z = stream.readUint16LE();
@@ -699,6 +847,42 @@ void RolloverOverlay::readData(Common::SeekableReadStream &stream) {
 	_flagOnClick.flag = stream.readByte();
 
 	_clickSound.readData(stream);
+}
+
+void RolloverOverlay::readDataNancy16(Common::SeekableReadStream &stream) {
+	readFilename(stream, _imageName);
+	_transparency = kPlayOverlayTransparent;
+	_z = stream.readUint16LE();
+	stream.skip(2);
+	_hoverCursor = stream.readUint16LE();
+
+	readRect(stream, _hotspotRect);
+	readRect(stream, _srcRect);
+	readRect(stream, _destRect);
+
+	_flagOnHover.label = stream.readSint16LE();
+	_flagOnHover.flag = stream.readByte();
+	_hoverSound.readData(stream);
+	stream.skip(1);
+
+	_sceneChange.sceneID = stream.readUint16LE();
+	_sceneChange.frameID = stream.readUint16LE();
+	_sceneChange.continueSceneSound = kContinueSceneSound;
+	_sceneChange.listenerFrontVector.set(0, 0, 1);
+	if (_sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
+	_flagOnClick.label = stream.readSint16LE();
+	_flagOnClick.flag = stream.readByte();
+	_clickSound.readData(stream);
+}
+
+void RolloverOverlay::clearHoverFlag() {
+	if (_flagOnHover.label != kEvNoEvent) {
+		NancySceneState.setEventFlag(_flagOnHover.label,
+			_flagOnHover.flag == g_nancy->_true ? g_nancy->_false : g_nancy->_true);
+	}
 }
 
 void RolloverOverlay::playSoundBlock(const RandomSoundBlock &block) {
@@ -736,6 +920,10 @@ void RolloverOverlay::handleInput(NancyInput &input) {
 	setVisible(hovered);
 
 	if (!hovered) {
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			clearHoverFlag();
+		}
+
 		return;
 	}
 
@@ -767,6 +955,23 @@ void RolloverOverlay::execute() {
 		// Visibility follows the mouse, see handleInput()
 		break;
 	case kActionTrigger:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			playSoundBlock(_clickSound);
+			NancySceneState.setEventFlag(_flagOnClick);
+
+			if (_sceneChange.sceneID == kNoScene) {
+				_state = kRun;
+				break;
+			}
+
+			setVisible(false);
+			_isHovered = false;
+			clearHoverFlag();
+			NancySceneState.changeScene(_sceneChange);
+			finishExecution();
+			break;
+		}
+
 		if (!_clickSoundStarted) {
 			playSoundBlock(_clickSound);
 			_clickSoundStarted = true;

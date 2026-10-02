@@ -341,7 +341,7 @@ void ValueTest::execute() {
 
 Common::String EventFlags::getRecordExtraInfo() const {
 	Common::String info;
-	for (uint i = 0; i < ARRAYSIZE(_flags.descs); ++i) {
+	for (uint i = 0; i < _flags.descs.size(); ++i) {
 		const FlagDescription &desc = _flags.descs[i];
 		if (desc.label == kFlagNoLabel) {
 			continue;
@@ -359,17 +359,7 @@ void EventFlags::readData(Common::SeekableReadStream &stream) {
 		if (g_nancy->getGameType() >= kGameTypeNancy15) {
 			// Nancy15 writes only the flags it actually sets, preceded by their
 			// number, instead of a fixed block of 10 descriptions
-			uint16 numFlags = stream.readUint16LE();
-
-			for (uint i = 0; i < numFlags; ++i) {
-				int16 label = stream.readSint16LE();
-				uint16 flag = stream.readUint16LE();
-
-				if (i < ARRAYSIZE(_flags.descs)) {
-					_flags.descs[i].label = label;
-					_flags.descs[i].flag = flag;
-				}
-			}
+			_flags.readDataCounted(stream);
 		} else {
 			_flags.readData(stream);
 		}
@@ -391,7 +381,9 @@ void EventFlagsMultiHS::readData(Common::SeekableReadStream &stream) {
 	EventFlags::readData(stream);
 
 	if (_hotspotType != kMultiHS) {
-		_hoverCursor = (CursorManager::CursorType)stream.readUint16LE();
+		// Nancy16 widened the cursor field to 32 bits
+		_hoverCursor = (CursorManager::CursorType)(g_nancy->getGameType() >= kGameTypeNancy16 ?
+			stream.readUint32LE() : stream.readUint16LE());
 	}
 
 	uint16 numHotspots = stream.readUint16LE();
@@ -455,12 +447,67 @@ void EventFlagsMultiHS::execute() {
 void RandomizeEventFlags::readData(Common::SeekableReadStream &stream) {
 	uint16 numFlags = stream.readUint16LE();
 	_flagLabels.resize(numFlags);
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Each entry is a label, the value to set, and a 32-bit weight
+		_flagValues.resize(numFlags);
+		_weights.resize(numFlags);
+
+		for (uint i = 0; i < numFlags; ++i) {
+			_flagLabels[i] = stream.readSint16LE();
+			_flagValues[i] = stream.readByte();
+			_weights[i] = stream.readUint32LE();
+		}
+
+		return;
+	}
+
 	for (uint i = 0; i < numFlags; ++i) {
 		_flagLabels[i] = stream.readSint16LE();
 	}
 }
 
+Common::String RandomizeEventFlags::getRecordExtraInfo() const {
+	Common::String out;
+	for (uint i = 0; i < _flagLabels.size(); ++i) {
+		if (i) {
+			out += ", ";
+		}
+
+		if (i < _weights.size()) {
+			out += Common::String::format("%d = %d @ %u", _flagLabels[i], _flagValues[i], _weights[i]);
+		} else {
+			out += Common::String::format("%d", _flagLabels[i]);
+		}
+	}
+
+	return out;
+}
+
 void RandomizeEventFlags::execute() {
+	// Nancy16: pick exactly one entry by weight
+	if (!_weights.empty() && _weights.size() == _flagLabels.size()) {
+		uint32 total = 0;
+		for (uint i = 0; i < _weights.size(); ++i) {
+			total += _weights[i];
+		}
+
+		if (total) {
+			uint32 roll = g_nancy->_randomSource->getRandomNumber(total - 1);
+			for (uint i = 0; i < _weights.size(); ++i) {
+				if (roll < _weights[i]) {
+					NancySceneState.setEventFlag(_flagLabels[i], _flagValues[i]);
+					break;
+				}
+
+				roll -= _weights[i];
+			}
+		}
+
+		_isDone = true;
+		return;
+	}
+
 	for (uint i = 0; i < _flagLabels.size(); ++i) {
 		NancySceneState.setEventFlag(_flagLabels[i],
 			g_nancy->_randomSource->getRandomBit() ? g_nancy->_true : g_nancy->_false);
@@ -566,6 +613,16 @@ void ModifyListEntry::execute() {
 	}
 
 	finishExecution();
+}
+
+void Nancy16JournalEntry::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _page);
+	readFilename(stream, _stringID);
+}
+
+void Nancy16TaskEntry::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _stringID);
+	_completionFlag = stream.readUint16LE();
 }
 
 Common::String ModifyListEntry::getRecordTypeName() const {

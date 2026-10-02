@@ -26,7 +26,9 @@
 #include "common/queue.h"
 
 #include "engines/nancy/commontypes.h"
+#include "engines/nancy/nduipanel.h"
 #include "engines/nancy/puzzledata.h"
+#include "engines/nancy/streams.h"
 
 #include "engines/nancy/action/actionmanager.h"
 
@@ -118,10 +120,28 @@ public:
 
 	bool isRunningAd() const { return _isRunningAd; }
 
-	void changeScene(const SceneChangeDescription &sceneDescription);
+	// A scene change requested while a Nancy16 stream is executing moves that
+	// stream instead of the player, unless bypassStreams is set.
+	void changeScene(const SceneChangeDescription &sceneDescription, bool bypassStreams = false);
 	void pushScene(int16 itemID = -1);
 	void popScene(bool inventory = false);
 	int16 getPushedInvItemID() const { return _sceneState.pushedInvItemID; }
+
+	// Nancy16: pushes the current scene and opens an INVD item's close-up scene.
+	// Returns false when the item has no usable view scene.
+	bool openItemViewScene(int16 itemID);
+
+	// Undoes the most recent pushScene. Returns false when nothing is pushed.
+	bool popPushedScene();
+
+	// Nancy16 parallel script flows. Empty on every earlier game.
+	StreamManager &getStreams() { return _streams; }
+
+	// Scene time of the executing stream, or of the main flow outside one
+	Time getFlowSceneTime() const;
+
+	// Counts a scene visit; used for scenes entered by streams
+	void bumpSceneCount(uint16 sceneID) { _flags.sceneCounts.getOrCreateVal(sceneID)++; }
 
 	// Nancy 11+ "UI prep scenes": opening a taskbar popup first runs a hidden,
 	// videoless scene whose event-flag-gated ARs populate the popup's content;
@@ -243,6 +263,9 @@ public:
 
 	void synchronize(Common::Serializer &serializer);
 
+	// The Nancy16 NDUI show/hide state; see nduipanel.h
+	void synchronizeNDUI(Common::Serializer &serializer);
+
 	UI::FullScreenImage &getFrame() { return _frame; }
 	UI::Viewport &getViewport() { return _viewport; }
 	UI::Textbox &getTextbox() { return _textbox; }
@@ -251,6 +274,49 @@ public:
 	UI::NotebookPopup &getNotebookPopup() { return _notebookPopup; }
 	UI::CellPhonePopup &getCellPhonePopup() { return _cellPhonePopup; }
 	UI::ConversationPopup &getConversationPopup() { return _conversationPopup; }
+
+	// Null unless the game routes conversations through an NDUI panel (Nancy16+).
+	NDUIPanel *getNarrationPanel() { return _narrationPanel; }
+	NDUIPanel *getConversationPanel() { return _conversationPanel; }
+
+	// The STAKEOUT list panel used by AR 212. Null if STAKEOUT is absent.
+	NDUIPanel *getStakeoutPanel() { return _stakeoutPanel; }
+
+	// Routes an NDUI command to whichever panel owns the named widget.
+	void applyNDUICommand(const Common::String &target, uint32 commandID);
+
+	// Routes a scroll step to whichever panel owns the named widget, since a
+	// ScrollBar's target is usually in a different panel.
+	void applyNDUIScroll(const Common::String &target, int delta);
+
+	// The scroll model of the panel that owns target. Returns false when no
+	// visible panel owns it or it has no model. Called every frame.
+	bool nduiScrollModel(const Common::String &target, int &position, int &page, int &range);
+
+	// Rebuilds the journal and task list from the event flags when opened
+	void refreshJournal();
+	void refreshTasklist();
+
+	// Shows journal page 0..3 (VENJH1..VENJH4) and hides the others; -1 hides all
+	void selectJournalPage(int index);
+
+	// Handles an NDUI command aimed at an "Engine_*" pseudo-target. Returns false
+	// for unhandled targets. value is the action's param, or the source widget's value.
+	bool applyNDUIEngineCommand(const Common::String &target, uint32 commandID,
+		const Common::String &paramString, double value = 0.0);
+
+	// The current value of a settings pseudo-target, or false if target is not a setting
+	bool getNDUISettingValue(const Common::String &target, double &out) const;
+
+	// The panel owning the named control, or null
+	NDUIPanel *findNDUIPanelWithControl(const Common::String &name);
+
+	// True while one of the modal NDUI dialogs (options, save, load) is up
+	bool isNDUIDialogOpen() const;
+
+	// Shows or hides the whole conversation dialog.
+	void setConversationUIVisible(bool visible);
+
 	UI::Clock *getClock();
 	UI::Camera *getCamera() { return _camera; }
 	UI::Taskbar *getTaskbar() { return _taskbar; }
@@ -314,6 +380,9 @@ public:
 private:
 	void init();
 	void load(bool fromSaveFile = false);
+
+	// Passes the scene's ENVS environment to the stream runtime
+	void updateEnvironment();
 	void run();
 	void handleInput();
 
@@ -363,6 +432,8 @@ private:
 	// Seeds a Hardy boy's journal and UI resources from his brother's the first
 	// time he is played.
 	void inheritBrotherProgress(uint characterIndex);
+	// Index into the executing stream's copy of the scratch flags, or -1
+	int scratchFlagIndex(int16 label) const;
 
 	struct SceneState {
 		SceneSummary summary;
@@ -413,6 +484,57 @@ private:
 	UI::Button *_menuButton;
 	UI::Button *_helpButton;
 	UI::Taskbar *_taskbar;
+
+	// Nancy16+ replaces the taskbar and popups with NDUI panels
+	Common::Array<NDUIPanel *> _nduiPanels;
+
+	// The PDA temporarily disables these toolbar controls during a call.
+	// 0xff means no PDA view is holding a return state.
+	byte _pdaReturnEnabled = 0xff;
+
+	// The CONVO panel, owned by _nduiPanels. Null on games using ConversationPopup.
+	NDUIPanel *_conversationPanel = nullptr;
+	NDUIPanel *_narrationPanel = nullptr;
+
+	// Every panel loaded from CONVO; they are shown and hidden together
+	Common::Array<NDUIPanel *> _conversationPanels;
+
+	// The panel holding the inventory grid, owned by _nduiPanels.
+	NDUIPanel *_inventoryPanel = nullptr;
+
+	// The panel holding the stake-out report list, owned by _nduiPanels.
+	NDUIPanel *_stakeoutPanel = nullptr;
+
+	// JOURNAL[2] holds the list of headings, JOURNAL[4..7] the four heading pages
+	NDUIPanel *_journalPanel = nullptr;
+	static const uint kNumJournalPages = 4;
+	NDUIPanel *_journalPagePanels[kNumJournalPages] = {};
+
+	// TASKLIST[4], root TasklistDialog
+	NDUIPanel *_tasklistPanel = nullptr;
+
+	// Which journal page is showing, or -1
+	int _journalPage = -1;
+
+	// Parses <base>_<character> for every PCUI character and returns the records
+	// whose dependencies are currently satisfied. The caller owns them.
+	Common::Array<Action::ActionRecord *> readListMember(const char *base);
+
+	// Set when the load screen's "New" button selects the "_StartNewGame_" entry
+	bool _loaderNewGameSelected = false;
+
+	// Starts a new game from the "Start_Game" checkpoint
+	void startNewGame();
+
+	// Root controls of the modal panels; the scene takes no clicks while one is shown
+	static const char *const kNDUIModalRoots[];
+
+	// Set when the save screen was opened from the quit prompt, so saving then quits
+	bool _quitAfterSave = false;
+
+	// The options screen controls, stored in ConfMan
+	bool applyNDUISetting(const Common::String &target, uint32 commandID, double value);
+
 	Time _buttonPressActivationTime;
 
 	// A clicked MENU/HELP taskbar button whose state change is deferred until
@@ -446,6 +568,10 @@ private:
 	Common::HashMap<uint32, PuzzleData *> _puzzleData;
 
 	Action::ActionManager _actionManager;
+
+	// Nancy16's parallel script flows. See streams.h.
+	StreamManager _streams;
+
 	Action::PlaySecondaryMovie *_activeMovie;
 	Action::ConversationSound *_activeConversation;
 

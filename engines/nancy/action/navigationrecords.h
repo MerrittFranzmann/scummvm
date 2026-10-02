@@ -273,6 +273,42 @@ protected:
 	Common::String getRecordTypeName() const override { return "MapCallHotMultiframe"; }
 };
 
+// Nancy16 type 25, "Scene Change with The Works"
+//   uint16   sceneID, frameID, continueSceneSound
+//   char[33] name, unused
+//   uint16   unknown, always 1
+//   int16    flag label, uint16 flag value   raised when the change fires
+//   uint32   cursor
+//   uint16   numHotspots, then numHotspots x (uint16 frameID + RECT)
+class SceneChangeTheWorks : public HotMultiframeSceneChange {
+public:
+	SceneChangeTheWorks() : HotMultiframeSceneChange(CursorManager::kHotspot) {}
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+	bool cursorSetFromScript() const override { return true; }
+
+	FlagDescription _flag;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SceneChangeTheWorks"; }
+};
+
+// Nancy16 type 21, "Scene Change with Frame and Stream": a 6-byte scene change
+// descriptor and the 33-byte name of the stream it applies to. "MainStream" is
+// the player's flow. A change addressed to a stream that is not running is dropped.
+class SceneChangeWithStream : public SceneChange {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+	Common::String _streamName;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SceneChangeWithStream"; }
+};
+
 } // End of namespace Action
 } // End of namespace Nancy
 

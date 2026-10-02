@@ -38,8 +38,9 @@ void readRect(Common::SeekableReadStream &stream, Common::Rect &inRect) {
 	inRect.right = stream.readSint32LE();
 	inRect.bottom = stream.readSint32LE();
 
-	// TVD's rects are non-inclusive
-	if (g_nancy->getGameType() > kGameTypeVampire && !inRect.isEmpty()) {
+	// TVD's and Nancy16+'s rects are non-inclusive
+	if (g_nancy->getGameType() > kGameTypeVampire && g_nancy->getGameType() < kGameTypeNancy16
+			&& !inRect.isEmpty()) {
 		++inRect.right;
 		++inRect.bottom;
 	}
@@ -53,8 +54,8 @@ void readRect(Common::Serializer &stream, Common::Rect &inRect, Common::Serializ
 		stream.syncAsSint32LE(inRect.right);
 		stream.syncAsSint32LE(inRect.bottom);
 
-		// TVD's rects are non-inclusive
-		if (version > kGameTypeVampire && !inRect.isEmpty()) {
+		// TVD's and Nancy16+'s rects are non-inclusive
+		if (version > kGameTypeVampire && version < kGameTypeNancy16 && !inRect.isEmpty()) {
 			++inRect.right;
 			++inRect.bottom;
 		}
@@ -65,7 +66,8 @@ void readRectArray(Common::SeekableReadStream &stream, Common::Array<Common::Rec
 	uint startSize = inArray.size();
 	inArray.resize(num + startSize);
 
-	for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+	// Avoid indexing one past the end when num is zero
+	for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 		readRect(stream, *rect);
 	}
 
@@ -82,14 +84,15 @@ void readRectArray(Common::Serializer &stream, Common::Array<Common::Rect> &inAr
 		uint startSize = inArray.size();
 		inArray.resize(num + startSize);
 
-		for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+		// Avoid indexing one past the end when num is zero
+		for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 			stream.syncAsSint32LE(rect->left);
 			stream.syncAsSint32LE(rect->top);
 			stream.syncAsSint32LE(rect->right);
 			stream.syncAsSint32LE(rect->bottom);
 
-			// TVD's rects are non-inclusive
-			if (version > kGameTypeVampire && !rect->isEmpty()) {
+			// TVD's and Nancy16+'s rects are non-inclusive
+			if (version > kGameTypeVampire && version < kGameTypeNancy16 && !rect->isEmpty()) {
 				++rect->right;
 				++rect->bottom;
 			}
@@ -136,7 +139,8 @@ void readRectArray16(Common::SeekableReadStream &stream, Common::Array<Common::R
 	uint startSize = inArray.size();
 	inArray.resize(num + startSize);
 
-	for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+	// Avoid indexing one past the end when num is zero
+	for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 		readRect16(stream, *rect);
 	}
 
@@ -153,14 +157,15 @@ void readRectArray16(Common::Serializer &stream, Common::Array<Common::Rect> &in
 		uint startSize = inArray.size();
 		inArray.resize(num + startSize);
 
-		for (Common::Rect *rect = &inArray[startSize]; rect != inArray.end(); ++rect) {
+		// Avoid indexing one past the end when num is zero
+		for (Common::Rect *rect = num ? &inArray[startSize] : inArray.end(); rect != inArray.end(); ++rect) {
 			stream.syncAsSint16LE(rect->left);
 			stream.syncAsSint16LE(rect->top);
 			stream.syncAsSint16LE(rect->right);
 			stream.syncAsSint16LE(rect->bottom);
 
-			// TVD's rects are non-inclusive
-			if (version > kGameTypeVampire && !rect->isEmpty()) {
+			// TVD's and Nancy16+'s rects are non-inclusive
+			if (version > kGameTypeVampire && version < kGameTypeNancy16 && !rect->isEmpty()) {
 				++rect->right;
 				++rect->bottom;
 			}

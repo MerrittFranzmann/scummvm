@@ -31,6 +31,7 @@
 #include "engines/nancy/action/miscrecords.h"
 
 #include "engines/nancy/state/scene.h"
+#include "engines/nancy/misc/specialeffect.h"
 
 #include "common/events.h"
 #include "common/config-manager.h"
@@ -84,6 +85,29 @@ void LightningOn::readData(Common::SeekableReadStream &stream) {
 }
 
 void SpecialEffect::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 replaced the special-effect block with a fade:
+		//   float  fade step
+		//   uint32 frames
+		//   uint32 from, uint32 to     alpha endpoints, (0,255) or (255,0)
+		//   RECT   area to fade
+		//   int16 label + byte flag    event flag set when it finishes
+		stream.skip(4);	// fade step
+		_totalTime = stream.readUint32LE();
+		const uint32 fadeFrom = stream.readUint32LE();
+		const uint32 fadeTo = stream.readUint32LE();
+		readRect(stream, _rect);
+
+		_flagOnCompletion.label = stream.readSint16LE();
+		_flagOnCompletion.flag = stream.readByte();
+
+		// kBlackout fades out, kCrossDissolve fades in
+		_type = (fadeFrom > fadeTo) ? Misc::SpecialEffect::kBlackout :
+			Misc::SpecialEffect::kCrossDissolve;
+		_fadeToBlackTime = _totalTime;
+		return;
+	}
+
 	if (g_nancy->getGameType() <= kGameTypeNancy6) {
 		_type = stream.readByte();
 		_fadeToBlackTime = stream.readUint16LE();
@@ -101,6 +125,11 @@ void SpecialEffect::execute() {
 		NancySceneState.specialEffect(_type, _fadeToBlackTime, _frameTime);
 	} else {
 		NancySceneState.specialEffect(_type, _totalTime, _fadeToBlackTime, _rect);
+	}
+
+	// Nancy16 records raise a flag once the effect has started
+	if (_flagOnCompletion.label != -1) {
+		NancySceneState.setEventFlag(_flagOnCompletion);
 	}
 
 	_isDone = true;
@@ -581,6 +610,48 @@ static Common::String readFixedSizeString(Common::SeekableReadStream &stream, ui
 	return result;
 }
 
+// Nancy16 configure payload, after the slot/command header:
+//   int16 hours, int16 minutes, int16 seconds, uint16 unused
+//   SoundGroup: uint16 numNames, numNames x char[33],
+//               uint16 channel, uint32 numLoops, uint16 volume
+//   uint16 numFlags, numFlags x { int16 label, int16 value }
+// The other commands have no payload.
+void ResetAndStartTimer::readNancy16Data(Common::SeekableReadStream &stream) {
+	if (_command != kConfigOneShot && _command != kConfigRepeating) {
+		return;
+	}
+
+	_hours = stream.readSint16LE();      // 0x04
+	_minutes = stream.readSint16LE();    // 0x06
+	_seconds = stream.readSint16LE();    // 0x08
+	stream.skip(2);                      // 0x0a, unused
+
+	// An empty name pool means the timer expires silently
+	const uint16 numNames = stream.readUint16LE();
+	Common::Array<Common::String> names;
+	for (uint i = 0; i < numNames; ++i) {
+		Common::String name;
+		readFilename(stream, name);
+		if (!name.empty() && !name.equalsIgnoreCase("NO SOUND")) {
+			names.push_back(name);
+		}
+	}
+
+	_sound.channelID = stream.readUint16LE();
+	_sound.numLoops = stream.readUint32LE();
+	_sound.volume = stream.readUint16LE();
+	_sound.name = names.empty() ? "NO SOUND" :
+		names[g_nancy->_randomSource->getRandomNumber(names.size() - 1)];
+
+	// Event flags fired when the configured duration elapses
+	const uint16 numFlags = stream.readUint16LE();
+	_flags.resize(numFlags);
+	for (uint i = 0; i < numFlags; ++i) {
+		_flags[i].label = stream.readSint16LE();
+		_flags[i].flag = (byte)stream.readSint16LE();
+	}
+}
+
 void ResetAndStartTimer::readData(Common::SeekableReadStream &stream) {
 	if (g_nancy->getGameType() < kGameTypeNancy12) {
 		_timerIndex = stream.readByte();
@@ -589,6 +660,11 @@ void ResetAndStartTimer::readData(Common::SeekableReadStream &stream) {
 
 	_timerIndex = stream.readSint16LE();    // 0x00
 	_command = stream.readSint16LE();        // 0x02
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		readNancy16Data(stream);
+		return;
+	}
 
 	switch (_command) {
 	case kAddTime:
@@ -658,6 +734,9 @@ void ResetAndStartTimer::execute() {
 	// Nancy 12+ issues a command to one of the software-timer slots. Every
 	// command other than kStart only takes effect while the slot is running.
 	TimerData::Timer *timer = getSoftwareTimer(_timerIndex);
+	debugC(1, kDebugActionRecord, "ControlTimer: slot %d command %d, %02d:%02d:%02d, sound '%s', %d flag(s)",
+		_timerIndex, _command, _hours, _minutes, _seconds, _sound.name.c_str(), (int)_flags.size());
+
 	if (timer) {
 		if (_command == kStart) {
 			timer->state = TimerData::Timer::kRunning;
@@ -1219,6 +1298,471 @@ void PlayChar::execute() {
 	}
 
 	finishExecution();
+}
+
+void NDUIControl::readData(Common::SeekableReadStream &stream) {
+	_commandID = stream.readUint32LE();
+	readFilename(stream, _target);
+	stream.skip(41);	// always zero
+}
+
+void NDUIControl::execute() {
+	NancySceneState.applyNDUICommand(_target, _commandID);
+	_isDone = true;
+}
+
+void SaveNamedGame::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _slotName);
+}
+
+void SaveNamedGame::execute() {
+	g_nancy->saveNamedGame(_slotName);
+	_isDone = true;
+}
+
+void LoadNamedGame::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _slotName);
+}
+
+void LoadNamedGame::execute() {
+	// The load is only queued, so mark the record done to avoid re-requesting it
+	// every frame
+	_isDone = true;
+	g_nancy->requestNamedLoad(_slotName);
+}
+
+void ClearNamedGame::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _slotName);
+}
+
+void ClearNamedGame::execute() {
+	g_nancy->deleteNamedGame(_slotName);
+	_isDone = true;
+}
+
+void ChangePlayerCharacter::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _characterName);
+}
+
+void ChangePlayerCharacter::execute() {
+	// The name should be one of the characters listed in PCUI
+	auto *pcui = (const PCUI *)g_nancy->getEngineData("PCUI");
+	bool known = false;
+	if (pcui) {
+		for (const PCUI::Character &chr : pcui->characters) {
+			if (chr.name.equalsIgnoreCase(_characterName)) {
+				known = true;
+				break;
+			}
+		}
+	}
+
+	if (!known && pcui) {
+		warning("Change player character to '%s', which the PCUI chunk does not list",
+			_characterName.c_str());
+	} else {
+		debugC(kDebugActionRecord, "Change player character to '%s'", _characterName.c_str());
+	}
+
+	_isDone = true;
+}
+
+void SceneChangeWithFlags::readData(Common::SeekableReadStream &stream) {
+	_sceneChange.readData(stream);
+	_flags.readDataCounted(stream);
+}
+
+void SceneChangeWithFlags::execute() {
+	_flags.execute();
+	NancySceneState.changeScene(_sceneChange);
+	_isDone = true;
+}
+
+void TypewriterText::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _textKey);
+	readRect(stream, _dest);
+
+	_charTime = stream.readDoubleLE();
+
+	_fontID = stream.readUint32LE();
+	_colourID = stream.readUint32LE();
+
+	_keySounds.readData(stream);
+
+	_doneFlag.label = stream.readSint16LE();
+	_doneFlag.flag = stream.readByte();
+}
+
+Common::String TypewriterText::getRecordExtraInfo() const {
+	return Common::String::format("key %s, box (%d, %d)-(%d, %d), %g ms/char, font %u, colour %u, %u key sounds on channel %d, flag %d = %d",
+		_textKey.c_str(), _dest.left, _dest.top, _dest.right, _dest.bottom,
+		_charTime, _fontID, _colourID, _keySounds.names.size(), _keySounds.channel,
+		_doneFlag.label, _doneFlag.flag);
+}
+
+// Number of characters to type, not counting markup codes
+static uint countTypedChars(const Common::String &text) {
+	uint count = 0;
+
+	for (uint i = 0; i < text.size(); ++i) {
+		char letter = 0;
+		int number = -1;
+		uint end = 0;
+
+		if (parseMarkupCode(text, i, letter, number, end)) {
+			i = end;
+			continue;
+		}
+
+		++count;
+	}
+
+	return count;
+}
+
+// The first `numChars` typed characters of `text`, keeping any markup codes
+// inside that prefix
+static Common::String typedPrefix(const Common::String &text, uint numChars) {
+	Common::String out;
+	uint count = 0;
+
+	for (uint i = 0; i < text.size(); ++i) {
+		char letter = 0;
+		int number = -1;
+		uint end = 0;
+
+		if (parseMarkupCode(text, i, letter, number, end)) {
+			out += Common::String(text.c_str() + i, end - i + 1);
+			i = end;
+			continue;
+		}
+
+		if (count >= numChars) {
+			break;
+		}
+
+		out += text[i];
+		++count;
+	}
+
+	return out;
+}
+
+void TypewriterText::init() {
+	_clipped = _dest;
+	_clipped.clip(NancySceneState.getViewport().getBounds());
+
+	// A missing key draws nothing and completes at once
+	_text = resolveSubtitleText(_textKey, Common::String(), "AUTOTEXT");
+	_numChars = countTypedChars(_text);
+
+	if (_clipped.isEmpty() || !_numChars) {
+		_initialised = true;
+		return;
+	}
+
+	_drawSurface.create(_clipped.width(), _clipped.height(), g_nancy->_graphics->getInputPixelFormat());
+	moveTo(_clipped);
+	setTransparent(true);
+	_drawSurface.clear(g_nancy->_graphics->getTransColor());
+
+	_initialised = true;
+	setVisible(true);
+	redraw();
+
+	RenderObject::init();
+}
+
+void TypewriterText::redraw() {
+	_drawSurface.clear(g_nancy->_graphics->getTransColor());
+	_needsRedraw = true;
+
+	if (!_shown) {
+		return;
+	}
+
+	// Lay the text out relative to the unclipped box
+	drawStyledTextToSurface(_drawSurface, typedPrefix(_text, _shown), (int)_fontID, (int)_colourID,
+		_dest.left - _clipped.left, _dest.top - _clipped.top, MAX<int>(1, _dest.width()));
+}
+
+// Plays a random key click. Clicks are longer than the per-character interval,
+// so a new one only starts once the channel is free.
+void TypewriterText::playKeyClick() {
+	if (_keySounds.names.empty() || g_nancy->_sound->isSoundPlaying((uint16)_keySounds.channel)) {
+		return;
+	}
+
+	const uint idx = _keySounds.names.size() == 1 ? 0 :
+		g_nancy->_randomSource->getRandomNumber(_keySounds.names.size() - 1);
+	const Common::String &name = _keySounds.names[idx];
+	if (name.empty() || name == "NO SOUND") {
+		return;
+	}
+
+	SoundDescription desc;
+	desc.name = name;
+	desc.channelID = _keySounds.channel;
+	desc.numLoops = 1;
+	desc.volume = _keySounds.volume;
+
+	g_nancy->_sound->loadSound(desc);
+	g_nancy->_sound->playSound(desc);
+}
+
+void TypewriterText::raiseDoneFlag() {
+	if (!_typingDone) {
+		_typingDone = true;
+		NancySceneState.setEventFlag(_doneFlag);
+	}
+}
+
+void TypewriterText::updateGraphics() {
+	if (!_initialised || _typingDone) {
+		return;
+	}
+
+	if (!_numChars) {
+		raiseDoneFlag();
+		return;
+	}
+
+	const uint32 now = g_nancy->getTotalPlayTime();
+	const double perChar = _charTime > 0.0 ? _charTime : 1.0;
+	uint target = (uint)((double)(now - _startTime) / perChar);
+	target = MIN(target, _numChars);
+
+	if (target > _shown) {
+		_shown = target;
+		playKeyClick();
+		redraw();
+	}
+
+	if (_shown >= _numChars) {
+		raiseDoneFlag();
+	}
+}
+
+void TypewriterText::execute() {
+	switch (_state) {
+	case kBegin:
+		init();
+		registerGraphics();
+		_startTime = g_nancy->getTotalPlayTime();
+		_state = kRun;
+		// fall through
+	case kRun:
+		break;
+	case kActionTrigger:
+		finishExecution();
+		break;
+	}
+}
+
+void DetectStreamSceneChange::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _streamName);
+	_flag.label = stream.readSint16LE();
+	_flag.flag = stream.readByte();
+}
+
+Common::String DetectStreamSceneChange::getRecordExtraInfo() const {
+	return Common::String::format("watching '%s', raises flag %d = %d",
+		_streamName.c_str(), _flag.label, _flag.flag);
+}
+
+void DetectStreamSceneChange::execute() {
+	StreamManager &streams = NancySceneState.getStreams();
+
+	switch (_state) {
+	case kBegin:
+		// Only scene changes after this point count. Comparing counters lets
+		// several watchers observe the same stream.
+		_watchedCountAtStart = streams.getWatchBaseline(_streamName);
+		_state = kRun;
+		// fall through
+	case kRun:
+		if (streams.getSceneChangeCount(_streamName) != _watchedCountAtStart) {
+			NancySceneState.setEventFlag(_flag);
+			finishExecution();
+		}
+
+		break;
+	case kActionTrigger:
+		finishExecution();
+		break;
+	}
+}
+
+void EndStream::readData(Common::SeekableReadStream &stream) {
+	readFilename(stream, _streamName);
+}
+
+Common::String EndStream::getRecordExtraInfo() const {
+	return _streamName.empty() ? "ends the stream this script is" :
+		Common::String::format("ends stream '%s'", _streamName.c_str());
+}
+
+void EndStream::execute() {
+	if (!NancySceneState.getStreams().end(_streamName) && _streamName.empty()) {
+		// No stream to end, so this closes an inventory item close-up.
+		// Nancy16 has no PopInvViewPriorScene records and uses this instead.
+		NancySceneState.popPushedScene();
+	}
+
+	_isDone = true;
+}
+
+// Blocks shared by the Nancy16 puzzle records:
+//   SoundGroup : uint16 count, count x char[33] name pool, uint16 channel,
+//                uint32 (always 1), uint16 volume        = 2 + 33n + 8
+//   Tail25     : uint16, RECT exit hotspot, uint16 cursor, uint16 exit scene,
+//                uint16 flag label, byte flag value      = 25, always last
+Common::String Nancy16ConsumeOnly::getRecordTypeName() const {
+	switch (_shape) {
+	case kPaperDollPuzzle:		return "PaperDollPuzzle";
+	case kFixedSize:		return "Nancy16FixedSize";
+	case kCountedTail:		return "Nancy16CountedTail";
+	case kRandomMovieGraph:		return "RandomMovieGraph";
+	case kRolloverOverlay:		return "RolloverOverlay";
+	case kStaticOverlayImage:	return "StaticOverlayImage";
+	default:			return "SceneChangeTheWorks";
+	}
+}
+
+// Skips a type 53 sound block: an event flag, a list of sound names, then the
+// shared sound settings if the list is not empty.
+static void readRolloverSoundBlock(Common::SeekableReadStream &stream) {
+	stream.skip(2); // Event flag label, -1 for none
+	stream.skip(1); // Event flag value
+
+	const uint16 numNames = stream.readUint16LE();
+	for (uint i = 0; i < numNames; ++i) {
+		Common::String name;
+		readFilename(stream, name);
+	}
+
+	if (numNames) {
+		stream.skip(2); // Channel
+		stream.skip(4); // Loop count
+		stream.skip(2); // Volume
+	}
+}
+
+void Nancy16ConsumeOnly::readData(Common::SeekableReadStream &stream) {
+	switch (_shape) {
+	case kSceneChangeTheWorks: {
+		const int64 start = stream.pos();
+		stream.seek(start + 49);
+		const uint16 count = stream.readUint16LE();
+		stream.seek(start + 69);
+
+		// The field counts the inline entry too, so only count - 1 follow.
+		if (count > 1) {
+			stream.skip((count - 1) * 18);
+		}
+
+		break;
+	}
+	case kFixedSize:
+		stream.skip(_size);
+		break;
+	case kPaperDollPuzzle: {
+		// Type 166: a 256-byte header, a counted array of 143-byte garment
+		// entries, then a 1132-byte tail with three SoundGroups and the
+		// placement table.
+		stream.seek(256, SEEK_CUR);
+		const uint16 numGarments = stream.readUint16LE();
+		stream.skip(143 * numGarments + 1132);
+		break;
+	}
+	case kCountedTail: {
+		// 21 bytes then a byte count at offset 19 giving 2-byte entries.
+		const int64 start = stream.pos();
+		stream.seek(start + 19);
+		const byte count = stream.readByte();
+		stream.seek(start + 21);
+		stream.skip(count * 2);
+		break;
+	}
+	case kRandomMovieGraph: {
+		// Types 42 and 43, "Random Movie/Fidget". Each clip lists the clips
+		// that may follow it, with weights summing to 100.
+		//   char[33] unused, always empty
+		//   char[33] name of the set ("random_movie", or the only clip in it)
+		//   uint16   draw order; uint16 unknown; int16 unknown; int16 unknown
+		//   uint32   scene to change to, 32767 for none
+		//   byte     event flag value
+		//   uint16   number of clip blocks
+		//   per block:
+		//     char[33] clip name
+		//     int16 x3, then uint32 min and uint32 max delay in milliseconds
+		//     byte     unknown
+		//     uint16   number of successors, then per successor a char[33]
+		//              clip name and an int16 weight
+		//   uint16   number of frame entries, then per entry a uint16 frame ID
+		//            and two rects (source in the video, destination on screen)
+		stream.skip(33);
+		readFilename(stream, _name);
+		stream.skip(2 + 2 + 2 + 2 + 4 + 1);
+
+		const uint16 numBlocks = stream.readUint16LE();
+		for (uint i = 0; i < numBlocks; ++i) {
+			stream.skip(33 + 6 + 4 + 4 + 1);
+			const uint16 numSuccessors = stream.readUint16LE();
+			stream.skip(numSuccessors * 35);
+		}
+
+		const uint16 numFrames = stream.readUint16LE();
+		stream.skip(numFrames * 34);
+		break;
+	}
+	case kRolloverOverlay: {
+		// Type 53, "rollover overlay": an image shown while the cursor is over
+		// a hotspot, with a sound and event flag for hover and for click.
+		//   char[33] image name, not a video
+		//   uint16 x3 draw order and two unknowns
+		//   rect     screen bounds
+		//   rect     source rect inside the image
+		//   rect     destination rect, so far always equal to the bounds
+		//   sound block (see readRolloverSoundBlock) for the hover
+		//   byte     unknown
+		//   uint32   scene to change to on click, 32767 for none
+		//   sound block for the click
+		readFilename(stream, _name);
+		stream.skip(6);
+		stream.skip(48);
+		readRolloverSoundBlock(stream);
+		stream.skip(1);
+		stream.skip(4);
+		readRolloverSoundBlock(stream);
+		break;
+	}
+	case kStaticOverlayImage: {
+		// Type 54, "Static Overlay Image"
+		//   char[33] image name
+		//   uint16   draw order
+		//   uint16   count, then count entries of a uint32 colour and an int16
+		//            event flag label
+		//   uint32   unknown, always 1
+		//   rect     source rect inside the image
+		//   rect     destination rect on screen
+		readFilename(stream, _name);
+		stream.skip(2);
+
+		const uint16 count = stream.readUint16LE();
+		stream.skip(count * 6);
+
+		stream.skip(4);
+		stream.skip(32);
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void Nancy16ConsumeOnly::execute() {
+	_isDone = true;
 }
 
 } // End of namespace Action

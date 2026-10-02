@@ -83,6 +83,8 @@ public:
 	int16 _currentViewportFrame = -1;
 	uint32 _nextFrameTime = 0;
 	AnimationType _animationType;
+	// Whether the current viewport frame has a blit description for this overlay
+	bool _hasBlitForCurrentFrame = false;
 	bool _usesAutotext;
 
 	bool canHaveHotspot() const override { return true; }
@@ -134,6 +136,43 @@ public:
 
 protected:
 	Common::String getRecordTypeName() const override { return "OverlayAnimTerse"; }
+};
+
+// Nancy16 AR 54, "Static Overlay Image". A static overlay like AR 52, plus a
+// table of colours, each tied to an event flag. The colour of the first set
+// flag is assumed to be a multiply tint; with none set the image is untinted.
+class OverlayStaticTinted : public RenderActionRecord {
+public:
+	OverlayStaticTinted() : RenderActionRecord(10) {}
+	virtual ~OverlayStaticTinted() { _fullSurface.free(); }
+
+	void init() override;
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+	void updateGraphics() override;
+
+	bool isViewportRelative() const override { return true; }
+
+protected:
+	Common::String getRecordTypeName() const override { return "OverlayStaticTinted"; }
+
+	// Rebuild _drawSurface from _fullSurface, multiplied by the tint at
+	// _tints[tintID] (or untinted when tintID is -1).
+	void applyTint(int tintID);
+	int pickTint() const;
+
+	struct TintEntry {
+		uint32 color = 0;		// 0xRRGGBBAA
+		int16 flagLabel = -1;
+	};
+
+	Common::Path _imageName;
+	Common::Rect _srcRect;
+	Common::Rect _destRect;
+	Common::Array<TintEntry> _tints;
+	int _currentTint = -2;		// -2 = never drawn, -1 = drawn untinted
+
+	Graphics::ManagedSurface _fullSurface;
 };
 
 class TableIndexOverlay : public Overlay {
@@ -195,7 +234,9 @@ protected:
 // Nancy14 AR 53. A rollover label: an image that is only drawn while the mouse
 // is inside its hotspot. Entering the hotspot plays a sound and sets an event
 // flag, and clicking it plays a second sound before setting another event flag
-// and changing the scene.
+// and changing the scene. Nancy16 drops the transparency and hover sound fields,
+// clears the hover flag when the mouse leaves, and keeps rollovers without a
+// scene change active after they are clicked.
 class RolloverOverlay : public RenderActionRecord {
 public:
 	RolloverOverlay() : RenderActionRecord(7) {}
@@ -217,7 +258,9 @@ public:
 protected:
 	Common::String getRecordTypeName() const override { return "RolloverOverlay"; }
 
+	void readDataNancy16(Common::SeekableReadStream &stream);
 	void playSoundBlock(const RandomSoundBlock &block);
+	void clearHoverFlag();
 
 	Common::Path _imageName;
 	uint16 _transparency = kPlayOverlayPlain;

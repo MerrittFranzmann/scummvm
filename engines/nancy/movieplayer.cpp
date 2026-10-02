@@ -260,6 +260,7 @@ const Graphics::Surface *MoviePlayer::decodeNextFrame(int frameNr) {
 
 	const Graphics::Surface *frame = _decoder->decodeNextFrame();
 
+
 	// The decoder reuses one surface per frame, so cache a copy.
 	if (_useFrameCache && frame && (uint)frameNr < _frameCache.size()) {
 		_frameCache[frameNr].copyFrom(*frame);

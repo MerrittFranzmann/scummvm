@@ -21,8 +21,15 @@
 
 #include "common/serializer.h"
 #include "common/config-manager.h"
+#include "common/system.h"
+
+#include "audio/mixer.h"
+#include "common/tokenizer.h"
 #include "common/func.h"
 #include "common/random.h"
+
+#include "engines/metaengine.h"
+#include "engines/savestate.h"
 
 #include "engines/nancy/nancy.h"
 #include "engines/nancy/iff.h"
@@ -34,9 +41,11 @@
 #include "engines/nancy/resource.h"
 
 #include "engines/nancy/state/scene.h"
+#include "engines/nancy/ndui.h"
 #include "engines/nancy/state/map.h"
 
 #include "engines/nancy/action/conversation.h"
+#include "engines/nancy/action/datarecords.h"
 #include "engines/nancy/action/secondarymovie.h"
 
 #include "engines/nancy/ui/button.h"
@@ -143,6 +152,24 @@ Scene::Scene() :
 		_hotspotDebug(50) {}
 
 Scene::~Scene() {
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		delete _nduiPanels[i];
+	}
+	_nduiPanels.clear();
+
+	// These alias the deleted panels, and action records may still query them
+	// during shutdown.
+	_conversationPanel = nullptr;
+	_conversationPanels.clear();
+	_narrationPanel = nullptr;
+	_inventoryPanel = nullptr;
+	_stakeoutPanel = nullptr;
+	_journalPanel = nullptr;
+	_tasklistPanel = nullptr;
+	for (uint i = 0; i < kNumJournalPages; ++i) {
+		_journalPagePanels[i] = nullptr;
+	}
+
 	delete _helpButton;
 	delete _menuButton;
 	delete _taskbar;
@@ -195,6 +222,7 @@ void Scene::onStateEnter(const NancyState::NancyState prevState) {
 		}
 
 		_actionManager.onPause(false);
+		_streams.onPause(false);
 
 		g_nancy->_graphics->redrawAll();
 
@@ -225,6 +253,7 @@ bool Scene::onStateExit(const NancyState::NancyState nextState) {
 	}
 
 	_actionManager.onPause(true);
+	_streams.onPause(true);
 
 	if (nextState == NancyState::kPause) {
 		g_nancy->_sound->pauseAllSounds(true);
@@ -242,14 +271,35 @@ bool Scene::onStateExit(const NancyState::NancyState nextState) {
 	return _destroyOnExit;
 }
 
-void Scene::changeScene(const SceneChangeDescription &sceneDescription) {
-	if (sceneDescription.sceneID == kNoScene || _state == kLoad) {
+void Scene::changeScene(const SceneChangeDescription &sceneDescription, bool bypassStreams) {
+	if (sceneDescription.sceneID == kNoScene) {
+		return;
+	}
+
+	// A record running inside a Nancy16 stream moves its own flow. This comes
+	// before the kLoad guard, since it is independent of the main flow.
+	if (!bypassStreams && _streams.redirectSceneChange(sceneDescription)) {
+		return;
+	}
+
+	if (_state == kLoad) {
 		return;
 	}
 
 	_sceneState.nextScene = sceneDescription;
+
+	// In Nancy16 a scene change to the current scene is a refresh and must not
+	// stop the scene's sound. The continueSceneSound field is always zero in the
+	// data, so it cannot be relied on for this.
+	if (g_nancy->getGameType() >= kGameTypeNancy16 &&
+			_sceneState.nextScene.sceneID == _sceneState.currentScene.sceneID) {
+		_sceneState.nextScene.continueSceneSound = kContinueSceneSound;
+	}
+
 	_state = kLoad;
 }
+
+static const char *const kPDAToolbarControls[] = { "ShowInv", "ShowJournal", "ShowTasklist" };
 
 void Scene::pushScene(int16 itemID) {
 	if (itemID == -1) {
@@ -271,6 +321,14 @@ void Scene::pushScene(int16 itemID) {
 }
 
 void Scene::popScene(bool inventory) {
+	if (_pdaReturnEnabled != 0xff) {
+		for (uint i = 0; i < ARRAYSIZE(kPDAToolbarControls); ++i) {
+			applyNDUICommand(kPDAToolbarControls[i],
+				(_pdaReturnEnabled & (1 << i)) ? kNDUICommandSet : kNDUICommandClear);
+		}
+		_pdaReturnEnabled = 0xff;
+	}
+
 	if (!inventory || _sceneState.pushedInvItemID == -1) {
 		_sceneState.pushedScene.continueSceneSound = kContinueSceneSound;
 		changeScene(_sceneState.pushedScene);
@@ -289,6 +347,73 @@ void Scene::popScene(bool inventory) {
 		_sceneState.pushedInvItemID = kEvNoEvent;
 		_sceneState.pushedInvScene.sceneID = kNoScene;
 	}
+}
+
+bool Scene::openItemViewScene(int16 itemID) {
+	// Nancy16 has no INV chunk; the item table moved to its own INVD member.
+	const INVD *invd = (const INVD *)g_nancy->getEngineData("INVD");
+	if (!invd) {
+		return false;
+	}
+
+	const INVD::Item *item = nullptr;
+	for (uint i = 0; i < invd->items.size(); ++i) {
+		if (invd->items[i].id == itemID) {
+			item = &invd->items[i];
+			break;
+		}
+	}
+
+	if (!item || !item->hasViewScene() || getItemDisabledState(itemID)) {
+		return false;
+	}
+
+	// "s6428" -> 6428
+	const Common::String &nm = item->viewSceneName;
+	uint16 viewScene = kNoScene;
+	if (nm.size() > 1 && (nm[0] == 's' || nm[0] == 'S')) {
+		viewScene = (uint16)atoi(nm.c_str() + 1);
+	}
+
+	if (viewScene == kNoScene || viewScene == 0) {
+		return false;
+	}
+
+	// A PDA call disables some toolbar controls and the data never re-enables
+	// them, so remember their state to restore it when the PDA closes.
+	if (itemID == 45 && _pdaReturnEnabled == 0xff) {
+		_pdaReturnEnabled = 0;
+		for (uint i = 0; i < ARRAYSIZE(kPDAToolbarControls); ++i) {
+			NDUIPanel *panel = findNDUIPanelWithControl(kPDAToolbarControls[i]);
+			if (panel && panel->isControlEnabled(kPDAToolbarControls[i])) {
+				_pdaReturnEnabled |= 1 << i;
+			}
+		}
+	}
+
+	if (hasItem(itemID)) {
+		pushScene(itemID);
+		// Viewing an item's close-up takes it out of the inventory; popScene
+		// puts it back.
+		removeItemFromInventory(itemID, false);
+	} else {
+		pushScene();
+	}
+
+	SceneChangeDescription sceneChange;
+	sceneChange.sceneID = viewScene;
+	sceneChange.continueSceneSound = kContinueSceneSound;
+	changeScene(sceneChange);
+	return true;
+}
+
+bool Scene::popPushedScene() {
+	if (!_sceneState.isInvScenePushed && !_sceneState.isScenePushed) {
+		return false;
+	}
+
+	popScene(_sceneState.isInvScenePushed);
+	return true;
 }
 
 void Scene::startUIPrepScene(int16 uiType, int16 prepSceneID) {
@@ -425,8 +550,11 @@ void Scene::addItemToInventory(int16 id) {
 			// inserted at the front, except that when the UIIV chunk opts in
 			// (appendItemsWhileOpen) an item added while the popup is open goes
 			// to the end. That's how the most recently dropped item ends up last.
+			// Nancy16 uses the NDUI INVENTORY panel instead of the InventoryPopup
+			const bool hasPopup = g_nancy->getGameType() < kGameTypeNancy16;
+
 			bool addToBack = false;
-			if (_inventoryPopup.isOpen()) {
+			if (hasPopup && _inventoryPopup.isOpen()) {
 				const UIIV *uiivData = GetEngineData(UIIV);
 				addToBack = uiivData && uiivData->appendItemsWhileOpen;
 			}
@@ -444,7 +572,12 @@ void Scene::addItemToInventory(int16 id) {
 				order.insert_at(0, id);
 			}
 
-			if (_inventoryPopup.isOpen()) {
+			if (_inventoryPanel) {
+				// The scrollbar's panel updates its thumb on its own next frame
+				_inventoryPanel->refreshInventory();
+			}
+
+			if (hasPopup && _inventoryPopup.isOpen()) {
 				_inventoryPopup.refreshGrid();
 			} else if (_taskbar) {
 				_taskbar->setNotification(kTaskButtonInventory, 0);
@@ -480,7 +613,11 @@ void Scene::removeItemFromInventory(int16 id, bool pickUp) {
 				}
 			}
 
-			if (_inventoryPopup.isOpen()) {
+			if (_inventoryPanel) {
+				_inventoryPanel->refreshInventory();
+			}
+
+			if (g_nancy->getGameType() < kGameTypeNancy16 && _inventoryPopup.isOpen()) {
 				_inventoryPopup.refreshGrid();
 			}
 		}
@@ -886,7 +1023,11 @@ void Scene::playPlayerCantSound(int16 itemID) {
 void Scene::playItemCantSound(int16 itemID, bool notHoldingSound) {
 	// Improvement: nancy2 never shows the caption text, even though it exists in the data; we show it
 	auto *inventoryData = GetEngineData(INV);
-	assert(inventoryData);
+
+	// Nancy16 has no INV chunk, and INVD has no "can't" sounds
+	if (!inventoryData) {
+		return;
+	}
 
 	// Nancy15 keeps no "can't" sounds in the inventory data; they come from the
 	// player character's own bank instead
@@ -1035,7 +1176,34 @@ int16 Scene::eventFlagToIndex(int16 label) const {
 	return label;
 }
 
+// The per-scene scratch flags belong to whichever flow is executing; see streams.h
+int Scene::scratchFlagIndex(int16 label) const {
+	if (!_streams.executing()) {
+		return -1;
+	}
+
+	const Common::Array<uint16> &generic = g_nancy->getStaticData().genericEventFlags;
+	if (generic.empty()) {
+		return -1;
+	}
+
+	// The table is contiguous, so the ends bound it
+	const int16 first = (int16)generic[0];
+	const int16 last = (int16)generic[generic.size() - 1];
+	if (label < first || label > last) {
+		return -1;
+	}
+
+	return label - first;
+}
+
 void Scene::setEventFlag(int16 label, byte flag) {
+	const int scratch = scratchFlagIndex(label);
+	if (scratch >= 0) {
+		_streams.executing()->setScratchFlag((uint)scratch, flag);
+		return;
+	}
+
 	label = eventFlagToIndex(label);
 
 	if (label > kEvNoEvent && (uint)label < g_nancy->getStaticData().numEventFlags) {
@@ -1048,6 +1216,11 @@ void Scene::setEventFlag(FlagDescription eventFlag) {
 }
 
 bool Scene::getEventFlag(int16 label, byte flag) const {
+	const int scratch = scratchFlagIndex(label);
+	if (scratch >= 0) {
+		return _streams.executing()->getScratchFlag((uint)scratch) == flag;
+	}
+
 	label = eventFlagToIndex(label);
 
 	if (label > kEvNoEvent && (uint)label < g_nancy->getStaticData().numEventFlags) {
@@ -1207,7 +1380,646 @@ void Scene::useHint(uint16 characterID, uint16 hintID) {
 	}
 }
 
+void Scene::setConversationUIVisible(bool visible) {
+	for (uint i = 0; i < _conversationPanels.size(); ++i) {
+		_conversationPanels[i]->setVisible(visible);
+	}
+}
+
+void Scene::applyNDUICommand(const Common::String &target, uint32 commandID) {
+	// The records show/hide the meter only, so its dialog has to follow it
+	if (target.equalsIgnoreCase("DanceMeter") &&
+			(commandID == kNDUICommandShow || commandID == kNDUICommandHide)) {
+		applyNDUICommand("DanceDialog", commandID);
+	}
+	// Both lists are rebuilt from the event flags before they are shown
+	if (commandID == kNDUICommandShow) {
+		if (target.equalsIgnoreCase("JournalDialog")) {
+			refreshJournal();
+		} else if (target.equalsIgnoreCase("TasklistDialog")) {
+			refreshTasklist();
+		}
+	} else if (commandID == kNDUICommandHide && target.equalsIgnoreCase("JournalDialog")) {
+		// The pages are hidden by the dialog's own bindings; reset the selection too
+		_journalPage = -1;
+	}
+
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		if (_nduiPanels[i]->applyCommand(target, commandID)) {
+			return;
+		}
+	}
+}
+
+// The scrollbar's thumb is updated by its own panel in NDUIPanel::updateGraphics
+void Scene::applyNDUIScroll(const Common::String &target, int delta) {
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		if (_nduiPanels[i]->ownsControl(target)) {
+			_nduiPanels[i]->listScrollBy(delta);
+		}
+	}
+}
+
+// Only visible panels are considered, which picks the journal page currently
+// shown out of the four a journal scrollbar names.
+bool Scene::nduiScrollModel(const Common::String &target, int &position, int &page, int &range) {
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		if (!_nduiPanels[i]->ownsControl(target) || !_nduiPanels[i]->isVisible()) {
+			continue;
+		}
+
+		if (_nduiPanels[i]->scrollModel(position, page, range)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Nancy16 keeps the journal and task list in ciftree members named
+// <LIST>_<character>, one action record per entry, whose dependencies decide
+// whether it is shown. The members for every PCUI character are concatenated,
+// with the "PUI_" prefix of the tree name stripped.
+static Common::Array<Common::String> journalListMembers(const char *base) {
+	Common::Array<Common::String> out;
+	const PCUI *pcui = GetEngineData(PCUI);
+	if (!pcui) {
+		return out;
+	}
+
+	for (uint i = 0; i < pcui->characters.size(); ++i) {
+		Common::String suffix = pcui->characters[i].imageName;
+		if (suffix.hasPrefixIgnoreCase("PUI_")) {
+			suffix = Common::String(suffix.c_str() + 4);
+		}
+
+		if (suffix.empty()) {
+			continue;
+		}
+
+		out.push_back(Common::String::format("%s_%s", base, suffix.c_str()));
+	}
+
+	return out;
+}
+
+// The entries are action records, so the dependencies are evaluated by the
+// ActionManager. They are never executed; the caller reads their fields.
+Common::Array<Action::ActionRecord *> Scene::readListMember(const char *base) {
+	Common::Array<Action::ActionRecord *> out;
+	const Common::Array<Common::String> members = journalListMembers(base);
+
+	for (uint m = 0; m < members.size(); ++m) {
+		IFF *iff = g_nancy->_resource->loadIFF(Common::Path(members[m]));
+		if (!iff) {
+			continue;
+		}
+
+		Common::SeekableReadStream *chunk = nullptr;
+		for (uint n = 0; chunk = iff->getChunkStream("ACT", n), chunk != nullptr; ++n) {
+			Action::ActionRecord *record = Action::ActionManager::createAndLoadNewRecord(*chunk);
+			delete chunk;
+
+			if (!record) {
+				continue;
+			}
+
+			_actionManager.processDependency(record->_dependencies, *record, true);
+			if (record->_dependencies.satisfied) {
+				out.push_back(record);
+			} else {
+				delete record;
+			}
+		}
+
+		delete iff;
+	}
+
+	return out;
+}
+
+void Scene::refreshTasklist() {
+	if (!_tasklistPanel) {
+		return;
+	}
+
+	const CVTX *autotext = (const CVTX *)g_nancy->getEngineData("AUTOTEXT");
+	Common::Array<NDUIPanel::ListRow> rows;
+	Common::Array<Action::ActionRecord *> records = readListMember("TASKLIST");
+
+	for (uint i = 0; i < records.size(); ++i) {
+		auto *entry = dynamic_cast<Action::Nancy16TaskEntry *>(records[i]);
+		if (entry && autotext && autotext->texts.contains(entry->_stringID)) {
+			NDUIPanel::ListRow row;
+			row.text = autotext->texts[entry->_stringID];
+			// Entries are ticked by their completion flag, not by the player
+			row.checked = getEventFlag((int16)entry->_completionFlag, g_nancy->_true);
+			rows.push_back(row);
+		}
+
+		delete records[i];
+	}
+
+	_tasklistPanel->setListRows("TasklistDialog", rows);
+}
+
+void Scene::refreshJournal() {
+	if (!_journalPanel) {
+		return;
+	}
+
+	const CVTX *autotext = (const CVTX *)g_nancy->getEngineData("AUTOTEXT");
+
+	Common::Array<Common::Array<NDUIPanel::ListRow> > pages;
+	pages.resize(kNumJournalPages);
+
+	Common::Array<Action::ActionRecord *> records = readListMember("JOURNAL");
+	for (uint i = 0; i < records.size(); ++i) {
+		auto *entry = dynamic_cast<Action::Nancy16JournalEntry *>(records[i]);
+		if (entry && autotext && autotext->texts.contains(entry->_stringID)) {
+			// The record names its page by the panel's root control (VENJH1..VENJH4)
+			for (uint p = 0; p < kNumJournalPages; ++p) {
+				if (_journalPagePanels[p] &&
+						_journalPagePanels[p]->getPanelName().equalsIgnoreCase(entry->_page)) {
+					NDUIPanel::ListRow row;
+					row.text = autotext->texts[entry->_stringID];
+					pages[p].push_back(row);
+					break;
+				}
+			}
+		}
+
+		delete records[i];
+	}
+
+	// The heading list. Each caption is the page's root control name looked up in
+	// AUTOTEXT. Empty pages are still listed.
+	Common::Array<NDUIPanel::ListRow> headings;
+	for (uint p = 0; p < kNumJournalPages; ++p) {
+		NDUIPanel::ListRow row;
+		if (_journalPagePanels[p]) {
+			const Common::String name = _journalPagePanels[p]->getPanelName();
+			row.text = (autotext && autotext->texts.contains(name)) ? autotext->texts[name] : name;
+			_journalPagePanels[p]->setListRows(name, pages[p]);
+		}
+
+		headings.push_back(row);
+	}
+
+	_journalPanel->setListRows("JournalItems", headings);
+	_journalPanel->setListSelection(_journalPage);
+}
+
+void Scene::selectJournalPage(int index) {
+	_journalPage = (index >= 0 && index < (int)kNumJournalPages) ? index : -1;
+
+	for (uint p = 0; p < kNumJournalPages; ++p) {
+		if (!_journalPagePanels[p]) {
+			continue;
+		}
+
+		applyNDUICommand(_journalPagePanels[p]->getPanelName(),
+			((int)p == _journalPage) ? kNDUICommandShow : kNDUICommandHide);
+	}
+
+	if (_journalPanel) {
+		_journalPanel->setListSelection(_journalPage);
+	}
+}
+
+NDUIPanel *Scene::findNDUIPanelWithControl(const Common::String &name) {
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		if (_nduiPanels[i]->ownsControl(name)) {
+			return _nduiPanels[i];
+		}
+	}
+
+	return nullptr;
+}
+
+// The game has no restart command. "New game" loads the "Start_Game" checkpoint
+// that the first scene writes, so it fails if that scene has never run.
+void Scene::startNewGame() {
+	static const char *const kStartGameSaveName = "Start_Game";
+
+	const int slot = g_nancy->findNamedSaveSlot(kStartGameSaveName);
+	if (slot < 0) {
+		warning("NDUI: 'new game' needs the '%s' checkpoint, which this profile has "
+			"never written - the game's first scene writes it, so start the game "
+			"normally once", kStartGameSaveName);
+		return;
+	}
+
+	debugC(1, kDebugEngine, "NDUI 'new game' -> named load '%s' from slot %d",
+		kStartGameSaveName, slot);
+
+	// Queued as a player load, which unlike a named load does not wait for dialogue to end
+	g_nancy->requestSlotLoad(slot);
+}
+
+const char *const Scene::kNDUIModalRoots[] = {
+	"OptionsDialog", "LoadDialog", "SaveDialog", "SaveQueryDialog"
+};
+
+bool Scene::isNDUIDialogOpen() const {
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		const Common::String root = _nduiPanels[i]->getPanelName();
+		for (uint n = 0; n < ARRAYSIZE(kNDUIModalRoots); ++n) {
+			if (root.equalsIgnoreCase(kNDUIModalRoots[n]) && _nduiPanels[i]->isVisible()) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+// The options screen controls send SetValue/Notify to "Engine_*" pseudo-targets:
+//   Engine_VoiceVolume    speech_volume
+//   Engine_FXVolume       sfx_volume
+//   Engine_MusicVolume    music_volume
+//   Engine_ClosedCaption  subtitles
+//   Engine_Matte          COLR chunk id
+//   Engine_GameWindow     0 standard/CRT, 1 windowed, 2 widescreen/LCD
+//   Engine_Font           font scale percentage
+// SetValue applies the setting, Notify also writes the configuration out.
+bool Scene::applyNDUISetting(const Common::String &target, uint32 commandID, double value) {
+	if (commandID != kNDUICommandSetValue && commandID != kNDUICommandNotify) {
+		return false;
+	}
+
+	const Common::String &domain = ConfMan.getActiveDomainName();
+	const int rounded = (int)(value + (value < 0 ? -0.5 : 0.5));
+
+	// The three volume sliders
+	static const struct { const char *engineTarget; const char *confKey; } kVolumes[] = {
+		{ "Engine_VoiceVolume",	"speech_volume" },
+		{ "Engine_FXVolume",	"sfx_volume" },
+		{ "Engine_MusicVolume",	"music_volume" }
+	};
+
+	for (uint i = 0; i < ARRAYSIZE(kVolumes); ++i) {
+		if (!target.equalsIgnoreCase(kVolumes[i].engineTarget)) {
+			continue;
+		}
+
+		// The slider's range is 0..100 and ConfMan's is 0..255.
+		const int level = CLIP<int>(rounded, 0, 100) * Audio::Mixer::kMaxMixerVolume / 100;
+		ConfMan.setInt(kVolumes[i].confKey, CLIP<int>(level, 0, Audio::Mixer::kMaxMixerVolume), domain);
+		g_nancy->syncSoundSettings();
+
+		if (commandID == kNDUICommandNotify) {
+			debugC(1, kDebugEngine, "NDUI setting %s = %d (%s %d)",
+				kVolumes[i].engineTarget, CLIP<int>(rounded, 0, 100),
+				kVolumes[i].confKey, ConfMan.getInt(kVolumes[i].confKey));
+			ConfMan.flushToDisk();
+		}
+
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_ClosedCaption")) {
+		ConfMan.setBool("subtitles", rounded != 0, domain);
+		g_nancy->syncSoundSettings();
+
+		if (commandID == kNDUICommandNotify) {
+			debugC(1, kDebugEngine, "NDUI setting Engine_ClosedCaption = %d (subtitles)", rounded != 0);
+			ConfMan.flushToDisk();
+		}
+
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_Matte")) {
+		auto *reg = (const FontRegistry *)g_nancy->getEngineData("FONTREG");
+		const FontRegistry::ColourEntry *colour = reg ? reg->findColourByID((uint32)rounded) : nullptr;
+		if (!colour) {
+			warning("NDUI: matte colour %d has no COLR chunk, ignoring", rounded);
+			return true;
+		}
+
+		ConfMan.setInt(kConfMatteColour, rounded, domain);
+		g_nancy->_graphics->setMatteColour(colour->argb[kNDUIColorNormal]);
+		g_nancy->_graphics->redrawAll();
+
+		if (commandID == kNDUICommandNotify) {
+			debugC(1, kDebugEngine, "NDUI setting Engine_Matte = COLR %d (%08x)",
+				rounded, colour->argb[kNDUIColorNormal]);
+			ConfMan.flushToDisk();
+		}
+
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_Font")) {
+		auto *reg = (const FontRegistry *)g_nancy->getEngineData("FONTREG");
+		if (!reg || (uint)rounded == g_nancy->_ttfFonts.getScalePercent()) {
+			return true;
+		}
+
+		ConfMan.setInt(kConfFontScale, rounded, domain);
+
+		// Every face is rebuilt at the new size, so recompose all NDUI panels.
+		// Scrollbar thumbs are brought up to date later in NDUIPanel::updateGraphics.
+		g_nancy->_ttfFonts.init(reg, (uint)rounded);
+		for (uint i = 0; i < _nduiPanels.size(); ++i) {
+			_nduiPanels[i]->recompose();
+		}
+
+		if (commandID == kNDUICommandNotify) {
+			debugC(1, kDebugEngine, "NDUI setting Engine_Font = %d%%", rounded);
+			ConfMan.flushToDisk();
+		}
+
+		return true;
+	}
+
+	// Engine_GameWindow also takes Hide, which quits; that is handled elsewhere
+	if (target.equalsIgnoreCase("Engine_GameWindow")) {
+		const int mode = CLIP<int>(rounded, 0, 2);
+		ConfMan.setInt(kConfWindowMode, mode, domain);
+
+		// Mode 1 is windowed. Mode 0 (CRT) is mapped to stretch and mode 2
+		// (widescreen) to fit.
+		const bool wantFullscreen = (mode != 1);
+		const char *stretch = (mode == 2) ? "fit" : "stretch";
+
+		ConfMan.setBool("fullscreen", wantFullscreen, domain);
+		if (g_system->hasFeature(OSystem::kFeatureStretchMode)) {
+			ConfMan.set("stretch_mode", stretch, domain);
+		}
+
+		if (g_system->hasFeature(OSystem::kFeatureFullscreenMode)) {
+			g_system->beginGFXTransaction();
+			g_system->setFeatureState(OSystem::kFeatureFullscreenMode, wantFullscreen);
+			if (g_system->hasFeature(OSystem::kFeatureStretchMode)) {
+				g_system->setStretchMode(stretch);
+			}
+
+			g_system->endGFXTransaction();
+			g_nancy->_graphics->redrawAll();
+		}
+
+		if (commandID == kNDUICommandNotify) {
+			debugC(1, kDebugEngine, "NDUI setting Engine_GameWindow = mode %d (fullscreen %d, stretch '%s')",
+				mode, (int)wantFullscreen, stretch);
+			ConfMan.flushToDisk();
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+bool Scene::getNDUISettingValue(const Common::String &target, double &out) const {
+	if (target.empty()) {
+		return false;
+	}
+
+	static const struct { const char *engineTarget; const char *confKey; } kVolumes[] = {
+		{ "Engine_VoiceVolume",	"speech_volume" },
+		{ "Engine_FXVolume",	"sfx_volume" },
+		{ "Engine_MusicVolume",	"music_volume" }
+	};
+
+	for (uint i = 0; i < ARRAYSIZE(kVolumes); ++i) {
+		if (target.equalsIgnoreCase(kVolumes[i].engineTarget)) {
+			const int level = CLIP<int>(ConfMan.getInt(kVolumes[i].confKey),
+				0, Audio::Mixer::kMaxMixerVolume);
+			out = (level * 100 + Audio::Mixer::kMaxMixerVolume / 2) / Audio::Mixer::kMaxMixerVolume;
+			return true;
+		}
+	}
+
+	if (target.equalsIgnoreCase("Engine_ClosedCaption")) {
+		out = ConfMan.getBool("subtitles") ? 1.0 : 0.0;
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_Matte")) {
+		out = ConfMan.getInt(kConfMatteColour);
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_Font")) {
+		out = ConfMan.getInt(kConfFontScale);
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_GameWindow")) {
+		// ScummVM's own fullscreen setting takes precedence
+		int mode = CLIP<int>(ConfMan.getInt(kConfWindowMode), 0, 2);
+		if (!ConfMan.getBool("fullscreen")) {
+			mode = 1;
+		} else if (mode == 1) {
+			mode = 0;
+		}
+
+		out = mode;
+		return true;
+	}
+
+	return false;
+}
+
+// The "Engine_*" pseudo-targets:
+//   Engine_Loader     Show open, Hide close, Invoke select an entry, Notify commit
+//   Engine_Saver      the same, for the save screen
+//   Engine_SaveQuery  "Do you want to save first?": Show yes, Hide no, Clear dismiss
+//   Engine_GameWindow Hide quits, SetValue picks a video mode, Set/Clear enable/disable
+// Engine_Inv, Engine_Flags and Engine_Index are handled by NDUIPanel.
+bool Scene::applyNDUIEngineCommand(const Common::String &target, uint32 commandID,
+		const Common::String &paramString, double value) {
+	const bool isLoader = target.equalsIgnoreCase("Engine_Loader");
+	const bool isSaver = target.equalsIgnoreCase("Engine_Saver");
+
+	// The options screen first, since Engine_GameWindow is also a setting
+	if (applyNDUISetting(target, commandID, value)) {
+		return true;
+	}
+
+	if (isLoader || isSaver) {
+		const char *const rootName = isLoader ? "LoadDialog" : "SaveDialog";
+		NDUIPanel *panel = findNDUIPanelWithControl(rootName);
+		if (!panel) {
+			return false;
+		}
+
+		switch (commandID) {
+		case kNDUICommandShow:
+			// The save list is read when the dialog is opened
+			panel->saveLoadRefresh();
+			_loaderNewGameSelected = false;
+
+			if (isSaver) {
+				// Default the save name to the current scene's description
+				Common::String suggested = getSceneSummary().description;
+				if (suggested.empty()) {
+					suggested = Common::String::format("Scene %u", _sceneState.currentScene.sceneID);
+				}
+
+				panel->saveLoadSetName(suggested);
+			}
+
+			applyNDUICommand(rootName, kNDUICommandShow);
+			return true;
+		case kNDUICommandHide:
+			applyNDUICommand(rootName, kNDUICommandHide);
+			if (isSaver) {
+				// Closing the save screen without saving cancels a pending quit
+				applyNDUICommand("SaveQueryDialog", kNDUICommandHide);
+				_quitAfterSave = false;
+			}
+
+			return true;
+		case kNDUICommandInvoke:
+			// Selecting an entry. The panel records list clicks itself; the "New" button
+			// selects the "_StartNewGame_" pseudo-entry, which Notify then commits.
+			_loaderNewGameSelected = isLoader && paramString.equalsIgnoreCase("_StartNewGame_");
+			return true;
+		case kNDUICommandNotify: {
+			// Commit.
+			if (isLoader) {
+				if (_loaderNewGameSelected) {
+					_loaderNewGameSelected = false;
+					applyNDUICommand(rootName, kNDUICommandHide);
+					startNewGame();
+					return true;
+				}
+
+				const int slot = panel->saveLoadSelectedSlot();
+				if (slot < 0) {
+					return true;	// nothing picked; the dialog stays up
+				}
+
+				applyNDUICommand(rootName, kNDUICommandHide);
+				g_nancy->requestSlotLoad(slot);
+				return true;
+			}
+
+			const Common::String name = panel->saveLoadName();
+			if (name.empty()) {
+				return true;
+			}
+
+			// Saves are keyed by name, so saving under an existing name overwrites it.
+			// The original has no overwrite prompt.
+			int slot = -1;
+			const int firstReserved = g_nancy->firstNamedSaveSlot();
+			const int autosaveSlot = g_nancy->getAutosaveSlot();
+			SaveStateList saves = g_nancy->getMetaEngine()->listSaves(ConfMan.getActiveDomainName().c_str());
+			for (const SaveStateDescriptor &save : saves) {
+				if (save.getSaveSlot() >= 0 && save.getSaveSlot() < firstReserved &&
+						save.getSaveSlot() != autosaveSlot &&
+						save.getDescription().equalsIgnoreCase(name)) {
+					slot = save.getSaveSlot();
+					break;
+				}
+			}
+
+			if (slot < 0) {
+				// A new name takes the lowest free slot below the reserved band
+				Common::Array<bool> taken(firstReserved);
+				for (const SaveStateDescriptor &save : saves) {
+					if (save.getSaveSlot() >= 0 && save.getSaveSlot() < firstReserved) {
+						taken[save.getSaveSlot()] = true;
+					}
+				}
+
+				for (int n = 0; n < firstReserved; ++n) {
+					if (!taken[n] && n != autosaveSlot) {
+						slot = n;
+						break;
+					}
+				}
+			}
+
+			if (slot < 0) {
+				warning("NDUI save '%s' skipped: no free slot", name.c_str());
+				return true;
+			}
+
+			// Close the dialog before saving, since the panels' visibility is saved too
+			applyNDUICommand(rootName, kNDUICommandHide);
+
+			const Common::Error err = g_nancy->saveGameState(slot, name, false);
+			if (err.getCode() != Common::kNoError) {
+				warning("NDUI save '%s' to slot %d failed: %s",
+					name.c_str(), slot, err.getDesc().c_str());
+				return true;
+			}
+
+			debugC(1, kDebugEngine, "NDUI save '%s' written to slot %d", name.c_str(), slot);
+
+			// The save was requested by the quit prompt
+			if (_quitAfterSave) {
+				_quitAfterSave = false;
+				g_nancy->quitGame();
+			}
+
+			return true;
+		}
+		default:
+			return true;	// a verb this subsystem has, that this port ignores
+		}
+	}
+
+	// SAVEGAME[1], "Do you want to save first?". Yes, No and X send Show, Hide and Clear.
+	if (target.equalsIgnoreCase("Engine_SaveQuery")) {
+		applyNDUICommand("SaveQueryDialog", kNDUICommandHide);
+
+		switch (commandID) {
+		case kNDUICommandShow:		// Yes: save, then leave.
+			_quitAfterSave = true;
+			applyNDUIEngineCommand("Engine_Saver", kNDUICommandShow, Common::String());
+			return true;
+		case kNDUICommandHide:		// No: leave without saving.
+			_quitAfterSave = false;
+			g_nancy->quitGame();
+			return true;
+		default:					// The X: neither, stay in the game.
+			_quitAfterSave = false;
+			return true;
+		}
+	}
+
+	// Already handled by applyNDUICommand and by the panels' own row clicks
+	if (target.equalsIgnoreCase("Engine_Journal") || target.equalsIgnoreCase("Engine_Tasklist")) {
+		return true;
+	}
+
+	if (target.equalsIgnoreCase("Engine_GameWindow")) {
+		if (commandID == kNDUICommandHide) {
+			// Quitting goes through the "Do you want to save first?" box
+			if (findNDUIPanelWithControl("SaveQueryDialog")) {
+				applyNDUICommand("SaveQueryDialog", kNDUICommandShow);
+			} else {
+				g_nancy->quitGame();
+			}
+
+			return true;
+		}
+
+		// SetValue is handled by applyNDUISetting. Set and Clear are ignored.
+		return true;
+	}
+
+	return false;
+}
+
 void Scene::registerGraphics() {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		_viewport.registerGraphics();
+		_hotspotDebug.registerGraphics();
+
+		for (uint i = 0; i < _nduiPanels.size(); ++i) {
+			_nduiPanels[i]->registerGraphics();
+		}
+
+		return;
+	}
+
 	_frame.registerGraphics();
 	_viewport.registerGraphics();
 
@@ -1582,7 +2394,11 @@ void Scene::synchronize(Common::Serializer &ser) {
 	if (!ser.isSaving()) {
 		// Clear generic flags
 		for (uint16 id : g_nancy->getStaticData().genericEventFlags) {
-			_flags.eventFlags[id] = g_nancy->_false;
+			// genericEventFlags holds labels, not indices
+			const int16 index = eventFlagToIndex((int16)id);
+			if (index > kEvNoEvent && (uint)index < _flags.eventFlags.size()) {
+				_flags.eventFlags[index] = g_nancy->_false;
+			}
 		}
 	}
 
@@ -1600,6 +2416,10 @@ void Scene::synchronize(Common::Serializer &ser) {
 			ser.syncAsUint16LE(entry._value);
 		}
 	} else {
+		// Replace rather than merge, or scenes visited after the save keep their
+		// live counts. Some second chance checkpoints depend on this.
+		_flags.sceneCounts.clear();
+
 		uint16 key = 0;
 		uint16 val = 0;
 		for (uint i = 0; i < numSceneCounts; ++i) {
@@ -1685,10 +2505,148 @@ void Scene::synchronize(Common::Serializer &ser) {
 		}
 	}
 
+	// Nancy16's parallel flows. Written after the main scene, event flags and
+	// scene counts, so those are in place when the streams are restored.
+	_streams.synchronize(ser);
+
+	if (ser.isLoading()) {
+		// The ambient environment is not saved, and loading the streams cleared it
+		updateEnvironment();
+	}
+
+	// The NDUI panels hold state that has to be refreshed after a load
+	if (ser.isLoading() && g_nancy->getGameType() >= kGameTypeNancy16) {
+		if (_inventoryPanel) {
+			_inventoryPanel->refreshInventory();
+
+			// The scrollbar thumb is updated later, by NDUIPanel::updateGraphics
+		}
+
+		if (_conversationPanel) {
+			// Saving is not possible during a conversation, so the box must be closed
+			_conversationPanel->convoClose();
+		}
+	}
+
+	// Nancy16 NDUI show/hide state. Last, so it overrides the fixups above.
+	synchronizeNDUI(ser);
+
+	if (ser.getVersion() >= 13) {
+		ser.syncAsByte(_pdaReturnEnabled);
+	} else if (ser.isLoading()) {
+		_pdaReturnEnabled = 0xff;
+	}
+
 	_isRunningAd = false;
 	ConfMan.removeKey("restore_after_ad", Common::ConfigManager::kTransientDomain);
 
 	g_nancy->_graphics->suppressNextDraw();
+}
+
+// The NDUI controls' visibility and enabled state are changed by the scripts, so
+// they are saved as a delta against each panel's initial state, keyed by panel
+// root name and control name.
+void Scene::synchronizeNDUI(Common::Serializer &ser) {
+	if (ser.getVersion() < 13 || g_nancy->getGameType() < kGameTypeNancy16) {
+		return;
+	}
+
+	if (ser.isSaving()) {
+		uint16 numPanels = _nduiPanels.size();
+		ser.syncAsUint16LE(numPanels);
+
+		for (uint i = 0; i < _nduiPanels.size(); ++i) {
+			Common::String name = _nduiPanels[i]->getPanelName();
+			ser.syncString(name);
+
+			Common::StringArray shownNames, enabledNames;
+			Common::Array<byte> shownValues, enabledValues;
+			_nduiPanels[i]->getStateDelta(shownNames, shownValues, enabledNames, enabledValues);
+
+			uint16 numShown = shownNames.size();
+			ser.syncAsUint16LE(numShown);
+			for (uint j = 0; j < numShown; ++j) {
+				ser.syncString(shownNames[j]);
+				ser.syncAsByte(shownValues[j]);
+			}
+
+			uint16 numEnabled = enabledNames.size();
+			ser.syncAsUint16LE(numEnabled);
+			for (uint j = 0; j < numEnabled; ++j) {
+				ser.syncString(enabledNames[j]);
+				ser.syncAsByte(enabledValues[j]);
+			}
+		}
+
+		return;
+	}
+
+	// Read the whole block, then apply it to every panel. Panels missing from
+	// the save get an empty delta, which resets them to their initial state.
+	Common::StringArray fileNames;
+	Common::Array<Common::StringArray> fileShown, fileEnabled;
+	Common::Array<Common::Array<byte> > fileShownVals, fileEnabledVals;
+
+	uint16 numPanels = 0;
+	ser.syncAsUint16LE(numPanels);
+
+	for (uint i = 0; i < numPanels; ++i) {
+		Common::String name;
+		ser.syncString(name);
+		fileNames.push_back(name);
+
+		Common::StringArray shownNames, enabledNames;
+		Common::Array<byte> shownValues, enabledValues;
+
+		uint16 numShown = 0;
+		ser.syncAsUint16LE(numShown);
+		for (uint j = 0; j < numShown; ++j) {
+			Common::String ctrl;
+			byte value = 0;
+			ser.syncString(ctrl);
+			ser.syncAsByte(value);
+			shownNames.push_back(ctrl);
+			shownValues.push_back(value);
+		}
+
+		uint16 numEnabled = 0;
+		ser.syncAsUint16LE(numEnabled);
+		for (uint j = 0; j < numEnabled; ++j) {
+			Common::String ctrl;
+			byte value = 0;
+			ser.syncString(ctrl);
+			ser.syncAsByte(value);
+			enabledNames.push_back(ctrl);
+			enabledValues.push_back(value);
+		}
+
+		fileShown.push_back(shownNames);
+		fileShownVals.push_back(shownValues);
+		fileEnabled.push_back(enabledNames);
+		fileEnabledVals.push_back(enabledValues);
+	}
+
+	// Scrollbar thumbs composed here may be stale; NDUIPanel::updateGraphics fixes them
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		const Common::String panelName = _nduiPanels[i]->getPanelName();
+
+		int match = -1;
+		for (uint j = 0; j < fileNames.size(); ++j) {
+			if (!panelName.empty() && fileNames[j].equalsIgnoreCase(panelName)) {
+				match = (int)j;
+				break;
+			}
+		}
+
+		if (match < 0) {
+			_nduiPanels[i]->applyStateDelta(Common::StringArray(), Common::Array<byte>(),
+				Common::StringArray(), Common::Array<byte>());
+			continue;
+		}
+
+		_nduiPanels[i]->applyStateDelta(fileShown[match], fileShownVals[match],
+			fileEnabled[match], fileEnabledVals[match]);
+	}
 }
 
 UI::Clock *Scene::getClock() {
@@ -1712,6 +2670,9 @@ void Scene::init() {
 	assert(bootSummary);
 
 	_flags.eventFlags.resize(g_nancy->getStaticData().numEventFlags, g_nancy->_false);
+
+	// A New Game must not inherit the previous playthrough's parallel flows.
+	_streams.endAll();
 
 	_flags.sceneCounts.clear();
 
@@ -1742,7 +2703,9 @@ void Scene::init() {
 		ConfMan.removeKey("load_ad", Common::ConfigManager::kTransientDomain);
 		_isRunningAd = true;
 	} else {
-		changeScene(bootSummary->firstScene);
+		SceneChangeDescription firstScene = bootSummary->firstScene;
+
+		changeScene(firstScene);
 	}
 
 	if (hintData) {
@@ -1909,10 +2872,11 @@ void Scene::load(bool fromSaveFile) {
 		_sceneState.currentScene.paletteID = 0;
 	}
 
-	// "NO_ART_SCENE" and (Nancy 11+) "POPUP_PREP_SCENE" are videoless sentinel
-	// scenes that carry only logic ARs; they have no viewport art to load.
-	if (_sceneState.summary.videoFile != "NO_ART_SCENE" &&
-			_sceneState.summary.videoFile != "POPUP_PREP_SCENE") {
+	// "NO_ART_SCENE", (Nancy 11+) "POPUP_PREP_SCENE" and "NO_BG" are videoless
+	// sentinel scenes that carry only logic ARs; they have no viewport art to load.
+	if (!_sceneState.summary.videoFile.equalsIgnoreCase("NO_ART_SCENE") &&
+			!_sceneState.summary.videoFile.equalsIgnoreCase("POPUP_PREP_SCENE") &&
+			!_sceneState.summary.videoFile.equalsIgnoreCase("NO_BG")) {
 		const Common::Path palettePath = !_sceneState.summary.palettes.empty() ?
 			_sceneState.summary.palettes[(byte)_sceneState.currentScene.paletteID] :
 			Common::Path();
@@ -1923,6 +2887,13 @@ void Scene::load(bool fromSaveFile) {
 							_sceneState.summary.panningType,
 							_sceneState.summary.videoFormat,
 							palettePath);
+	} else if (_viewport._drawSurface.getPixels() == nullptr) {
+		// These scenes keep the previous scene's art. If there is none, e.g. after
+		// loading a save taken in one, use a blank frame.
+		_viewport._drawSurface.create(_viewport.getBounds().width(),
+			_viewport.getBounds().height(), g_nancy->_graphics->getInputPixelFormat());
+		_viewport._drawSurface.clear(0);
+		_viewport.setNeedsRedraw(true);
 	}
 
 	if (_viewport.getFrameCount() <= 1) {
@@ -1964,12 +2935,59 @@ void Scene::load(bool fromSaveFile) {
 	}
 
 	// Re-evaluate taskbar notification states against the new scene.
-	if (g_nancy->getGameType() >= kGameTypeNancy10) {
+	// Nancy16+ has no taskbar
+	if (g_nancy->getGameType() >= kGameTypeNancy10 && _taskbar) {
 		_taskbar->updateNotificationStates(_sceneState.currentScene.sceneID);
 	}
 
 	delete sceneIFF;
 	_state = kStartSound;
+
+	// Tell the Nancy16 stream runtime the main flow has moved
+	_streams.onMainSceneLoaded(_sceneState.currentScene.sceneID);
+
+	// ...and which environment it is in. When loading a save, Scene::synchronize
+	// does this itself after restoring the streams.
+	if (!fromSaveFile) {
+		updateEnvironment();
+	}
+
+}
+
+// Nancy16 ENVS: the scene summary's sound name is the environment code. Entering
+// an environment starts its ambient script; see streams.h.
+void Scene::updateEnvironment() {
+	if (g_nancy->getGameType() < kGameTypeNancy16) {
+		return;
+	}
+
+	auto *envs = (const ENVS *)g_nancy->getEngineData("ENVS");
+	if (!envs) {
+		return;
+	}
+
+	// Some scenes leave the sound name blank and carry the code in the description
+	const Common::String *candidates[2] = { &_sceneState.summary.sound.name, &_sceneState.summary.description };
+
+	for (uint c = 0; c < ARRAYSIZE(candidates); ++c) {
+		if (candidates[c]->empty()) {
+			continue;
+		}
+
+		for (const ENVS::Environment &env : envs->environments) {
+			if (env.sceneCode.equalsIgnoreCase(*candidates[c])) {
+				_streams.setEnvironment(env.sceneCode, env.ambientSoundName);
+				return;
+			}
+		}
+	}
+
+	// Scenes with no environment keep the current one's ambience
+}
+
+Time Scene::getFlowSceneTime() const {
+	const Stream *executing = _streams.executing();
+	return executing ? executing->getSceneTime() : _timers.sceneTime;
 }
 
 void Scene::run() {
@@ -2013,6 +3031,23 @@ void Scene::run() {
 
 	_actionManager.processActionRecords();
 
+	// Nancy16's parallel flows run after the main one, so a stream that reacts
+	// to a main-flow scene change sees it in the same frame it happens.
+	_streams.process();
+
+	// Update NDUI controls bound to values, such as the coin purse
+	for (uint i = 0; i < _nduiPanels.size(); ++i) {
+		_nduiPanels[i]->refreshBoundValues();
+	}
+
+	// The journal panel records clicks on its heading list itself
+	if (_journalPanel) {
+		const int picked = _journalPanel->listTakePicked();
+		if (picked >= 0) {
+			selectJournalPage(picked);
+		}
+	}
+
 	if (_lightning) {
 		_lightning->run();
 	}
@@ -2029,7 +3064,9 @@ void Scene::run() {
 		}
 	}
 
+
 	g_nancy->_sound->soundEffectMaintenance();
+
 
 	if (_state == kLoad) {
 		g_nancy->_graphics->suppressNextDraw();
@@ -2189,6 +3226,9 @@ void Scene::fireSoftwareTimer(TimerData::Timer &timer) {
 }
 
 void Scene::fireTimerTrigger(TimerData::Trigger &trigger) {
+	debugC(1, kDebugActionRecord, "Software timer trigger fired after %ums, sound '%s'",
+		trigger.durationMs, trigger.sound.name.c_str());
+
 	// Set the trigger's event flags
 	for (uint i = 0; i < ARRAYSIZE(trigger.flags); ++i) {
 		if (trigger.flags[i].label != kFlagNoLabel) {
@@ -2252,9 +3292,16 @@ void Scene::handleInput() {
 	}
 
 	NancyInput input = g_nancy->_input->getInput();
+	// Nancy16+: a right-click puts down the held item
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && getHeldItem() != -1 &&
+		(input.input & NancyInput::kRightMouseButtonUp)) {
+		setHeldItem(-1);
+		input.input &= ~NancyInput::kRightMouseButtonUp;
+	}
 
-	// Warp the mouse below the inactive zone during dialogue scenes
-	if (_activeConversation != nullptr) {
+	// Warp the mouse below the inactive zone during dialogue scenes. Nancy16
+	// has NDUI controls above it.
+	if (_activeConversation != nullptr && g_nancy->getGameType() < kGameTypeNancy16) {
 		const Common::Rect &inactiveZone = g_nancy->_cursor->getPrimaryVideoInactiveZone();
 
 		if (g_nancy->getGameType() == kGameTypeVampire) {
@@ -2309,13 +3356,55 @@ void Scene::handleInput() {
 											confine.top, confine.bottom - 1);
 			g_nancy->_cursor->warpCursor(input.mousePos);
 		}
-		_conversationPopup.handleInput(input);
-		_inventoryPopup.handleInput(input);
-		_notebookPopup.handleInput(input);
-		_cellPhonePopup.handleInput(input);
+		// Nancy16+ uses NDUI panels instead of these popups and the textbox
+		if (g_nancy->getGameType() < kGameTypeNancy16) {
+			_conversationPopup.handleInput(input);
+			_inventoryPopup.handleInput(input);
+			_notebookPopup.handleInput(input);
+			_cellPhonePopup.handleInput(input);
+		}
 	}
 
-	_textbox.handleInput(input);
+	if (g_nancy->getGameType() < kGameTypeNancy16) {
+		_textbox.handleInput(input);
+	} else {
+		// Only the frontmost modal dialog receives input
+		NDUIPanel *modal = nullptr;
+		for (const char *root : kNDUIModalRoots) {
+			for (NDUIPanel *panel : _nduiPanels) {
+				if (panel->isVisible() && panel->getPanelName().equalsIgnoreCase(root))
+					modal = panel;
+			}
+		}
+		// Inventory items and conversation replies first. Later-registered panels
+		// sit on top, so ask them first.
+		for (int i = (int)_nduiPanels.size() - 1; i >= 0; --i) {
+			if (!modal || modal == _nduiPanels[i])
+				_nduiPanels[i]->handleInput(input);
+		}
+
+		// Then the authored controls. The smallest hit across all panels wins, since
+		// a large invisible button in LOWERMATTE overlaps the taskbar buttons.
+		int bestPanel = -1, bestIndex = -1, bestArea = 0;
+		for (int i = (int)_nduiPanels.size() - 1; i >= 0; --i) {
+			if (modal && modal != _nduiPanels[i]) continue;
+			int idx = -1, area = 0;
+			if (_nduiPanels[i]->findControlHit(input.mousePos, idx, area)) {
+				if (bestPanel < 0 || area < bestArea) {
+					bestPanel = i;
+					bestIndex = idx;
+					bestArea = area;
+				}
+			}
+		}
+
+		if (bestPanel >= 0) {
+			_nduiPanels[bestPanel]->activateControl(bestIndex, input);
+		} else if (isNDUIDialogOpen()) {
+			// Nothing behind a modal dialog takes input
+			input.eatMouseInput();
+		}
+	}
 	if (g_nancy->getGameType() <= kGameTypeNancy9) {
 		_inventoryBox.handleInput(input);
 	}
@@ -2358,15 +3447,22 @@ void Scene::handleInput() {
 		getClock()->handleInput(input);
 	}
 
-	if (!cameraActive) {
-		_viewport.handleInput(input);
-	}
+	// Overlay-only Nancy16 scenes keep the previous scene's image but not its frame
+	const bool overlayOnly = g_nancy->getGameType() >= kGameTypeNancy16 &&
+		(_sceneState.summary.videoFile.equalsIgnoreCase("NO_ART_SCENE") ||
+		 _sceneState.summary.videoFile.equalsIgnoreCase("POPUP_PREP_SCENE") ||
+		 _sceneState.summary.videoFile.equalsIgnoreCase("NO_BG"));
+	if (!overlayOnly) {
+		if (!cameraActive) {
+			_viewport.handleInput(input);
+		}
 
-	_sceneState.currentScene.verticalOffset = _viewport.getCurVerticalScroll();
+		_sceneState.currentScene.verticalOffset = _viewport.getCurVerticalScroll();
 
-	if (_sceneState.currentScene.frameID != _viewport.getCurFrame()) {
-		_sceneState.currentScene.frameID = _viewport.getCurFrame();
-		g_nancy->_sound->recalculateSoundEffects();
+		if (_sceneState.currentScene.frameID != _viewport.getCurFrame()) {
+			_sceneState.currentScene.frameID = _viewport.getCurFrame();
+			g_nancy->_sound->recalculateSoundEffects();
+		}
 	}
 
 	if (!cameraActive) {
@@ -2485,6 +3581,141 @@ void Scene::initStaticData() {
 	auto *bootSummary = GetEngineData(BSUM);
 	assert(bootSummary);
 
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16+ replaces the taskbar, textbox and popups with NDUI panels
+		_viewport.init();
+
+		// The panels are all kept resident, since an NDUI command is dropped when no
+		// loaded panel owns its target. All but the two mattes start hidden.
+		static const char *const kPersistentPanels[] = {
+			"UPPERMATTE", "LOWERMATTE", "CONVO", "INVENTORY", "STAKEOUT",
+			"OPTIONS", "LOADGAME", "SAVEGAME", "JOURNAL", "TASKLIST", "DANCEPUZZLE"
+		};
+		for (uint i = 0; i < ARRAYSIZE(kPersistentPanels); ++i) {
+			// The row template is in a chunk of its own, and is given to every panel
+			// of the member once all of them are loaded.
+			Common::Array<NDUIPanel *> memberPanels;
+			NDUIControl rowTemplate;
+			bool haveRowTemplate = false;
+
+			for (uint chunk = 0; ; ++chunk) {
+				NDUI *data = loadNDUIChunk(kPersistentPanels[i], chunk);
+				if (!data) {
+					break;
+				}
+
+				if (data->hasPanel) {
+					// The panel takes ownership of the chunk. The mattes go at z 7 with the
+					// taskbar, the popup replacements at 12 and the dialogs above them at 13.
+					const bool isPopupPanel = !strcmp(kPersistentPanels[i], "CONVO") ||
+						!strcmp(kPersistentPanels[i], "INVENTORY") ||
+						!strcmp(kPersistentPanels[i], "STAKEOUT") ||
+						!strcmp(kPersistentPanels[i], "JOURNAL") ||
+						!strcmp(kPersistentPanels[i], "TASKLIST") ||
+						!strcmp(kPersistentPanels[i], "DANCEPUZZLE");
+					const bool isDialogPanel = !strcmp(kPersistentPanels[i], "OPTIONS") ||
+						!strcmp(kPersistentPanels[i], "LOADGAME") ||
+						!strcmp(kPersistentPanels[i], "SAVEGAME");
+					NDUIPanel *panel = new NDUIPanel(isDialogPanel ? 13 : (isPopupPanel ? 12 : 7));
+					panel->init(data);
+
+					if (!strcmp(kPersistentPanels[i], "DANCEPUZZLE")) {
+						panel->setStartsHidden();
+						panel->setVisible(false);
+					}
+
+					if (isDialogPanel) {
+						// Authored as visible, since the original only builds them when opened
+						panel->setStartsHidden();
+						panel->setVisible(false);
+					}
+
+					if (!strcmp(kPersistentPanels[i], "INVENTORY")) {
+						panel->setStartsHidden();
+						panel->setVisible(false);
+
+						if (panel->isInventoryPanel()) {
+							_inventoryPanel = panel;
+						}
+					}
+
+					// LOWERMATTE owns the centred VO caption line.
+					if (panel->isNarrationPanel()) {
+						_narrationPanel = panel;
+					}
+
+					if (!strcmp(kPersistentPanels[i], "CONVO")) {
+						_conversationPanels.push_back(panel);
+						panel->setStartsHidden();
+						panel->setVisible(false);
+
+						if (panel->isConversationPanel()) {
+							_conversationPanel = panel;
+						}
+					}
+
+					if (!strcmp(kPersistentPanels[i], "STAKEOUT")) {
+						panel->setStartsHidden();
+						panel->setVisible(false);
+
+						if (panel->isStakeoutPanel()) {
+							_stakeoutPanel = panel;
+						}
+					}
+
+					if (!strcmp(kPersistentPanels[i], "JOURNAL")) {
+						panel->setStartsHidden();
+						panel->setVisible(false);
+
+						// JOURNAL[2] owns the JournalItems ListBox; JOURNAL[4..7]
+						// are the four heading pages, in chunk order.
+						if (panel->ownsControl("JournalItems")) {
+							_journalPanel = panel;
+						} else {
+							for (uint p = 0; p < kNumJournalPages; ++p) {
+								if (!_journalPagePanels[p]) {
+									_journalPagePanels[p] = panel;
+									break;
+								}
+							}
+						}
+					}
+
+					if (!strcmp(kPersistentPanels[i], "TASKLIST")) {
+						panel->setStartsHidden();
+						panel->setVisible(false);
+
+						if (panel->ownsControl("TasklistDialog")) {
+							_tasklistPanel = panel;
+						}
+					}
+
+					memberPanels.push_back(panel);
+					_nduiPanels.push_back(panel);
+				} else {
+					// A panel-less chunk is a standalone control; in the list
+					// members it is the row template.
+					if (data->children.size() == 1) {
+						rowTemplate = data->children[0];
+						haveRowTemplate = true;
+					}
+
+					delete data;
+				}
+			}
+
+			if (haveRowTemplate) {
+				for (uint p = 0; p < memberPanels.size(); ++p) {
+					memberPanels[p]->setRowTemplate(rowTemplate);
+				}
+			}
+		}
+
+		g_nancy->setMouseEnabled(true);
+		_state = kLoad;
+		return;
+	}
+
 	Common::Path imageName;
 
 	if (g_nancy->getGameType() <= kGameTypeNancy9) {
@@ -2577,7 +3808,10 @@ void Scene::initStaticData() {
 void Scene::clearSceneData(bool nextIsNoArt) {
 	// Clear generic flags only
 	for (uint16 id : g_nancy->getStaticData().genericEventFlags) {
-		_flags.eventFlags[id] = g_nancy->_false;
+		const int16 index = eventFlagToIndex((int16)id);
+		if (index > kEvNoEvent && (uint)index < _flags.eventFlags.size()) {
+			_flags.eventFlags[index] = g_nancy->_false;
+		}
 	}
 
 	clearLogicConditions();
@@ -2628,4 +3862,5 @@ void Scene::clearPuzzleData() {
 Scene::PlayFlags::LogicCondition::LogicCondition() : flag(g_nancy->_false) {}
 
 } // End of namespace State
+
 } // End of namespace Nancy

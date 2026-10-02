@@ -263,6 +263,22 @@ SoundManager::~SoundManager() {
 }
 
 Common::String SoundManager::resolveMusicMix(const Common::String &name) const {
+	// Nancy16 merged LVLN and MMIX into ENVS, so resolve the location code there
+	if (auto *envs = (const ENVS *)g_nancy->getEngineData("ENVS")) {
+		for (const ENVS::Environment &env : envs->environments) {
+			if (!env.sceneCode.equalsIgnoreCase(name)) {
+				continue;
+			}
+
+			if (env.musicNames.empty()) {
+				return "NO SOUND";
+			}
+
+			const uint pick = g_nancy->_randomSource->getRandomNumber(env.musicNames.size() - 1);
+			return env.musicNames[pick];
+		}
+	}
+
 	auto *mmix = GetEngineData(MMIX);
 	if (!mmix) {
 		// Pre-Nancy13, or no mix table present
@@ -425,6 +441,14 @@ void SoundManager::playSound(uint16 channelID) {
 						0, DisposeAfterUse::NO);
 
 	soundEffectMaintenance(channelID, true);
+
+	// A sound started while a Nancy16 stream's records are executing belongs to
+	// that stream, so ending the stream can silence it. No-op in the main flow.
+	NancySceneState.getStreams().noteSoundChannel(channelID);
+
+	// Whether the channel belongs to an ambient stream is decided on every play
+	const Stream *owner = NancySceneState.getStreams().executing();
+	chan.isAmbient = owner && owner->isAmbient();
 }
 
 void SoundManager::playSound(const SoundDescription &description) {
@@ -466,6 +490,20 @@ void SoundManager::pauseAllSounds(bool pause) {
 	_mixer->pauseAll(pause);
 }
 
+Common::String SoundManager::describeActiveChannels() const {
+	Common::String out;
+	for (uint i = 0; i < _channels.size(); ++i) {
+		if (!_mixer->isSoundHandleActive(_channels[i].handle)) {
+			continue;
+		}
+
+		out += Common::String::format("%s%u:%s%s", out.empty() ? "" : ",",
+			i, _channels[i].name.c_str(), _channels[i].isAmbient ? "*" : "");
+	}
+
+	return out;
+}
+
 bool SoundManager::isSoundPlaying(uint16 channelID) const {
 	if (channelID >= _channels.size() || !_channels[channelID].stream)
 		return false;
@@ -499,6 +537,9 @@ void SoundManager::stopSound(uint16 channelID) {
 	if (isSoundPlaying(channelID)) {
 		_mixer->stopHandle(chan.handle);
 	}
+
+	// A stopped channel no longer belongs to an ambient stream
+	chan.isAmbient = false;
 
 	// Persistent sounds only stop playing but do not get unloaded
 	if (!chan.isPersistent) {
@@ -742,6 +783,12 @@ void SoundManager::stopAndUnloadSceneSpecificSounds() {
 	}
 
 	for (uint i = 0; i < numSSChans; ++i) {
+		// Nancy16 ambient stream sounds are only started once, so they are
+		// left playing until StreamManager::end() stops them
+		if (i < _channels.size() && _channels[i].isAmbient) {
+			continue;
+		}
+
 		stopSound(i);
 	}
 

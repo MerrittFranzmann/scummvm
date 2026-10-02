@@ -27,6 +27,9 @@
 #include "common/rect.h"
 #include "common/serializer.h"
 
+#include "graphics/font.h"
+#include "graphics/managed_surface.h"
+
 #include "engines/nancy/commontypes.h"
 
 namespace Nancy {
@@ -42,6 +45,16 @@ void readRect16(Common::SeekableReadStream &stream, Common::Rect &inRect);
 void readRect16(Common::Serializer &stream, Common::Rect &inRect, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);
 void readRectArray16(Common::SeekableReadStream &stream, Common::Array<Common::Rect> &inArray, uint num, uint totalNum = 0);
 void readRectArray16(Common::Serializer &stream, Common::Array<Common::Rect> &inArray, uint num, uint totalNum = 0, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);
+
+// Draws a string with NDUI inline markup (<cN>, <fN>, <bN>, <n>, <u>) into a surface.
+// Pass -1 for either base id to use the default. Returns the height of the laid-out text.
+int drawStyledTextToSurface(Graphics::ManagedSurface &surf, const Common::String &text,
+	int baseFontID, int baseColourID,
+	int x, int y, int wrapWidth, Graphics::TextAlign align = Graphics::kTextAlignLeft);
+
+// Parses one inline markup code such as "<c1>" or "<n>" at pos. Returns false
+// if the text there is not a valid code. endPos is set to the index of the '>'.
+bool parseMarkupCode(const Common::String &in, uint pos, char &letter, int &number, uint &endPos);
 
 void readFilename(Common::SeekableReadStream &stream, Common::String &inString);
 void readFilename(Common::Serializer &stream, Common::String &inString, Common::Serializer::Version minVersion = 0, Common::Serializer::Version maxVersion = Common::Serializer::kLastVersion);

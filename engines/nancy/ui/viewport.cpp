@@ -41,6 +41,7 @@ void Viewport::init() {
 
 	moveTo(viewportData->screenPosition);
 
+
 	setEdgesSize(	bootSummary->verticalEdgesSize,
 					bootSummary->verticalEdgesSize,
 					bootSummary->horizontalEdgesSize,

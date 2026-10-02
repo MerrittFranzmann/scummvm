@@ -112,6 +112,16 @@ void GraphicsManager::draw(bool updateScreen) {
 		}
 	}
 
+	// Nancy16 has no full-screen frame at the bottom of the render stack, so
+	// reset dirty rects to the opaque matte colour before recompositing.
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		const uint32 baseColor = _screen.format.ARGBToColor(0xff,
+			(_matteColour >> 16) & 0xff, (_matteColour >> 8) & 0xff, _matteColour & 0xff);
+		for (Common::Rect rect : _dirtyRects) {
+			_screen.fillRect(rect, baseColor);
+		}
+	}
+
 	// Perform the actual drawing. This checks for cases where something would be fully obscured,
 	// and skips them (e.g. redrawing the Viewport won't also redraw the background)
 	for (Common::Rect rect : _dirtyRects) {

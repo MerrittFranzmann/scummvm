@@ -44,6 +44,9 @@ namespace Action {
 class ActionRecord;
 struct DependencyRecord;
 
+// Evaluates one type-13/14 player-table dependency
+bool evaluateValueTestDependency(const DependencyRecord &dep);
+
 // The class that handles ActionRecords and their execution
 class ActionManager {
 public:

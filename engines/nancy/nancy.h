@@ -32,6 +32,7 @@
 #include "nancy/time.h"
 #include "nancy/commontypes.h"
 #include "nancy/enginedata.h"
+#include "nancy/ttffont.h"
 
 namespace Common {
 class RandomSource;
@@ -70,7 +71,22 @@ namespace Nancy {
 //       day, with the day itself stored separately
 // - 12: QuizPuzzle slots are keyed by a 32-bit id, and the Nancy15
 //       protagonists each carry their own cell phone
-static const int kSavegameVersion = 12;
+// - 13: Nancy16 stream table, NDUI show/hide state and PDA return state
+static const int kSavegameVersion = 13;
+
+// Options-screen settings that have no ScummVM config key of their own:
+//   nancy_matte_colour  COLR chunk id
+//   nancy_font_scale    percent
+//   nancy_window_mode   0 standard/CRT, 1 windowed, 2 widescreen/LCD
+extern const char *const kConfMatteColour;
+extern const char *const kConfFontScale;
+extern const char *const kConfWindowMode;
+
+// COLR chunk 4, black
+static const int kDefaultMatteColourID = 4;
+
+// Text is rendered at the authored FONT heights. The original defaults to 127%.
+static const int kDefaultFontScalePercent = 100;
 
 struct NancyGameDescription;
 
@@ -105,6 +121,33 @@ public:
 	bool canSaveGameStateCurrently(Common::U32String *msg = nullptr) override;
 
 	void secondChance();
+
+	// Nancy16 action record 114, "Save a Named Game". Maps the name onto a slot
+	// in the reserved band. Does nothing if the engine cannot save right now.
+	void saveNamedGame(const Common::String &name);
+
+	// The slot a named save would be written to, or -1 if the reserved band is full
+	int getNamedSaveSlot(const Common::String &name) const;
+
+	// The slot a named save already occupies, or -1 if no save by that name exists
+	int findNamedSaveSlot(const Common::String &name) const;
+
+	// Nancy16 action record 115, "Load a saved Game". The load is queued, since it
+	// tears down the scene whose action records are being executed.
+	void requestNamedLoad(const Common::String &name);
+
+	// Nancy16 action record 108, "Clear Saved Data", drops a named save.
+	void deleteNamedGame(const Common::String &name);
+
+	// The NDUI load dialog's Load button. Queued for the same reason as requestNamedLoad().
+	void requestSlotLoad(int slot);
+
+	// Named saves live in a reserved band directly below the second chance slot
+	static const int kNumNamedSaveSlots = 20;
+
+	// First slot of the reserved band; slots below it are the player's own
+	int firstNamedSaveSlot() const;
+
 
 	const char *getCopyrightString() const;
 	uint32 getGameFlags() const;
@@ -149,6 +192,9 @@ public:
 
 	// Managers
 	ResourceManager *_resource;
+
+	// Nancy16+: substitutes for the typefaces FONT names but the game does not ship
+	TTFFontProvider _ttfFonts;
 	GraphicsManager *_graphics;
 	CursorManager *_cursor;
 	InputManager *_input;
@@ -186,6 +232,20 @@ private:
 	void populateStaticData();
 
 	Common::Error synchronize(Common::Serializer &serializer);
+
+	// Performs a load queued by requestNamedLoad(), from the top of the main loop
+	void runPendingNamedLoad();
+
+	// Named save waiting to be loaded, empty if none. Retried every frame until it succeeds.
+	Common::String _pendingNamedLoad;
+
+	// Set once the pending load has been refused, so the refusal is only logged once
+	bool _namedLoadWasDeferred = false;
+
+	// Slot the NDUI load dialog asked for, -1 if none. Takes priority over a named load.
+	int _pendingSlotLoad = -1;
+
+	bool isCompressed();
 
 	StaticData _staticData;
 	Common::HashMap<Common::String, EngineData *> _engineData;

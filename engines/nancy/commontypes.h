@@ -49,6 +49,8 @@ static const int8 kFlagNoLabel						= -1;
 static const int8 kEvNoEvent						= -1;
 static const int8 kFrNoFrame						= -1;
 static const uint16 kNoScene						= 9999;
+// Nancy16 switched to its own sentinel; readers normalise it to kNoScene
+static const uint16 kNancy16NoScene					= 32767;
 
 // Nancy15 alternates between three protagonists (Nancy and the Hardy boys
 // Frank and Joe), each of whom keeps their own UI and journal. The two
@@ -231,9 +233,13 @@ struct FrameBlitDescription {
 
 // Describes 10 event flag changes to be executed when an action is triggered
 struct MultiEventFlagDescription {
-	FlagDescription descs[10];
+	// Fixed at 10 up to Nancy15; Nancy16 records carry a count
+	MultiEventFlagDescription() { descs.resize(10); }
+
+	Common::Array<FlagDescription> descs;
 
 	void readData(Common::SeekableReadStream &stream);
+	void readDataCounted(Common::SeekableReadStream &stream);	// Nancy16+
 	void execute();
 };
 

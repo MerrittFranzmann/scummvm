@@ -31,6 +31,22 @@
 namespace Nancy {
 
 void SceneChangeDescription::readData(Common::SeekableReadStream &stream, bool longFormat) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 shrank this descriptor to 6 bytes: the vertical offset and the
+		// listener front vector are gone
+		sceneID = stream.readUint16LE();
+		frameID = stream.readUint16LE();
+		continueSceneSound = stream.readUint16LE();
+		frontVectorFrameID = frameID;
+
+		// Nancy16 uses 0x7fff as its "no scene" sentinel
+		if (sceneID == kNancy16NoScene) {
+			sceneID = kNoScene;
+		}
+
+		return;
+	}
+
 	sceneID = stream.readUint16LE();
 	frameID = stream.readUint16LE();
 	verticalOffset = stream.readUint16LE();
@@ -116,14 +132,24 @@ void FrameBlitDescription::readData(Common::SeekableReadStream &stream, bool lon
 }
 
 void MultiEventFlagDescription::readData(Common::SeekableReadStream &stream) {
-	for (uint i = 0; i < 10; ++i) {
+	descs.resize(10);
+	for (uint i = 0; i < descs.size(); ++i) {
+		descs[i].label = stream.readSint16LE();
+		descs[i].flag = stream.readUint16LE();
+	}
+}
+
+void MultiEventFlagDescription::readDataCounted(Common::SeekableReadStream &stream) {
+	// Nancy16+: an explicit count rather than a fixed ten
+	descs.resize(stream.readUint16LE());
+	for (uint i = 0; i < descs.size(); ++i) {
 		descs[i].label = stream.readSint16LE();
 		descs[i].flag = stream.readUint16LE();
 	}
 }
 
 void MultiEventFlagDescription::execute() {
-	for (uint i = 0; i < 10; ++i) {
+	for (uint i = 0; i < descs.size(); ++i) {
 		NancySceneState.setEventFlag(descs[i]);
 	}
 }

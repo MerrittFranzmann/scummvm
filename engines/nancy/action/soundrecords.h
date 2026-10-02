@@ -303,6 +303,8 @@ protected:
 	virtual bool perGroupFlags() const = 0;
 
 	void showGroupSubtitle();
+	void showNarrationCaption(const Common::String &soundName);
+	void clearNarrationCaption();
 	void startCurrentSound();
 
 	Common::Array<SoundGroup> _groups;

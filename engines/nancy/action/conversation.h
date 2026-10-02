@@ -48,6 +48,18 @@ public:
 	void execute() override;
 
 	virtual bool isVideoDonePlaying() { return true; }
+
+	// Nancy16 reordered this record and put a counted name array at the front
+	void readDataNancy16(Common::SeekableReadStream &stream);
+
+	// The names the record opens with. names[0] is the sound, and for the cel
+	// variant also the XSheet; the rest are alternate takes.
+	Common::Array<Common::String> _nancy16Names;
+
+	// Nancy16 names the conditional-dialogue and goodbye scripts directly
+	// rather than by character id. Empty means the record has none.
+	Common::String _nancy16ConditionalScript;
+	Common::String _nancy16GoodbyeScript;
 	bool isViewportRelative() const override { return true; }
 
 	// Enhancement: cut the currently playing line short, as if its sound and
@@ -123,6 +135,10 @@ protected:
 	void addGoodbye();
 	void addConditionalDialogueNancy12();
 	void addGoodbyeNancy12();
+
+	// Nancy12 finds these scripts by character id, Nancy16 by name
+	void addConditionalDialogueFromScript(const Common::Path &scriptName);
+	void addGoodbyeFromScript(const Common::Path &scriptName);
 
 	Common::String _text;
 
@@ -241,6 +257,27 @@ protected:
 
 	uint _curFrame = 0;
 	uint32 _nextFrameTime = 0;
+
+	// Nancy16: each XSheet layer is a video with an alpha channel. Layer 1 is
+	// the head, layer 0 the body. See readXSheetNancy16().
+	void readXSheetNancy16(const Common::String &xsheetName);
+	void drawNancy16Layer(RenderedCel &obj, const Graphics::Surface &frame, const Common::Rect &dest);
+	int nancy16BodyFrameFor(uint headFrame) const;
+
+	// Indices into _celRObjects on the Nancy16 path.
+	static const uint kNancy16HeadCel = 0;
+	static const uint kNancy16BodyCel = 1;
+
+	MoviePlayer _nancy16Video;
+	bool _nancy16HasVideo = false;
+	Common::Rect _nancy16Dest;	// from the XSheet's layer 1 (head) rect
+
+	MoviePlayer _nancy16BodyVideo;
+	bool _nancy16HasBody = false;
+	Common::String _nancy16BodyName;			// XSheet layer 0 name, e.g. "COLINBODY"
+	Common::Rect _nancy16BodyDest;				// from the XSheet's layer 0 (body) rect
+	Common::Array<int32> _nancy16BodyFrames;	// one body frame index per head frame
+	int _nancy16BodyCurFrame = -1;				// body frame currently pasted, -1 = none
 
 	Common::Array<RenderedCel> _celRObjects;
 

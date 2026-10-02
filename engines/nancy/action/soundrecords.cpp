@@ -31,6 +31,7 @@
 #include "engines/nancy/action/soundrecords.h"
 
 #include "engines/nancy/state/scene.h"
+#include "engines/nancy/nduipanel.h"
 
 namespace Nancy {
 namespace Action {
@@ -98,6 +99,13 @@ static Common::String resolveSoundSubtitle(const Common::String &soundName) {
 
 void SetVolume::readData(Common::SeekableReadStream &stream) {
 	channel = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 widened the volume to 32 bits
+		volume = (byte)stream.readUint32LE();
+		return;
+	}
+
 	volume = stream.readByte();
 }
 
@@ -122,6 +130,13 @@ void SetMovieVolume::execute() {
 
 void FadeSoundToSilence::readData(Common::SeekableReadStream &stream) {
 	channel = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 has no padding before the fade time
+		fadeTimeMs = stream.readUint32LE();
+		return;
+	}
+
 	stream.skip(2); // pad / flag
 	fadeTimeMs = stream.readUint32LE();
 }
@@ -240,6 +255,10 @@ void PlaySound::readDataNancy13(Common::SeekableReadStream &stream) {
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
 	_sceneChange.continueSceneSound = kContinueSceneSound;	// sounds keep playing into the new scene
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
 	_afterSoundAction = stream.readByte();	// overlay-refresh control; unused
 
 	// The single event flag became a list of { label, value } pairs.
@@ -399,6 +418,11 @@ void PlaySoundTerse::readData(Common::SeekableReadStream &stream) {
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
 
+	// Nancy16 uses 0x7fff as "no scene change"
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
+
 	_sceneChange.continueSceneSound = kContinueSceneSound;
 	_soundEffect = new SoundEffectDescription;
 
@@ -409,6 +433,11 @@ void PlaySoundEventFlagTerse::readData(Common::SeekableReadStream &stream) {
 	_sound.readTerse(stream);
 	_changeSceneImmediately = stream.readByte();
 	_sceneChange.sceneID = stream.readUint16LE();
+
+	// Nancy16 uses 0x7fff as "no scene change"
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _sceneChange.sceneID == kNancy16NoScene) {
+		_sceneChange.sceneID = kNoScene;
+	}
 	_flag.label = stream.readUint16LE();
 	_flag.flag = stream.readByte();
 
@@ -492,6 +521,24 @@ void PlaySoundMultiHS::execute() {
 
 void StopSound::readData(Common::SeekableReadStream &stream) {
 	_channelID = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 uses an 8-byte scene descriptor: sceneID, frameID,
+		// verticalOffset and two unused bytes
+		_sceneChange._sceneChange.sceneID = stream.readUint16LE();
+		_sceneChange._sceneChange.frameID = stream.readUint16LE();
+		_sceneChange._sceneChange.verticalOffset = stream.readUint16LE();
+		stream.skip(2);
+
+		_sceneChange._sceneChange.continueSceneSound = kContinueSceneSound;
+
+		if (_sceneChange._sceneChange.sceneID == kNancy16NoScene) {
+			_sceneChange._sceneChange.sceneID = kNoScene;
+		}
+
+		return;
+	}
+
 	_sceneChange.readData(stream);
 }
 
@@ -590,6 +637,10 @@ void ConcatMultiSound::readData(Common::SeekableReadStream &stream) {
 	_sound.numLoops = (uint16)stream.readSint32LE();	// stored as an int32 on disk
 	_sound.volume = stream.readUint16LE();
 	_exitSceneID = stream.readSint16LE();
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _exitSceneID == kNancy16NoScene) {
+		_exitSceneID = kNoScene;
+	}
+
 	_subtitleMode = stream.readByte();
 
 	// MultiSound: one shared set of flag pairs.
@@ -631,19 +682,47 @@ void ConcatMultiSound::showGroupSubtitle() {
 	}
 }
 
+void ConcatMultiSound::showNarrationCaption(const Common::String &soundName) {
+	if (!ConfMan.getBool("subtitles")) {
+		return;
+	}
+
+	Common::String text = resolveSoundSubtitle(soundName);
+	if (text.empty()) {
+		return;
+	}
+
+	if (NDUIPanel *narration = NancySceneState.getNarrationPanel()) {
+		narration->narrationSetCaption(text);
+	} else if (NDUIPanel *convo = NancySceneState.getConversationPanel()) {
+		convo->convoOpen();
+		convo->convoSetCaption(text);
+	}
+}
+
+void ConcatMultiSound::clearNarrationCaption() {
+	if (NDUIPanel *narration = NancySceneState.getNarrationPanel()) {
+		narration->narrationClear();
+	}
+}
+
 void ConcatMultiSound::startCurrentSound() {
 	SoundGroup &group = _groups[_currentGroup];
 	SequencedSound &sound = group.sounds[_currentSound];
 
-	// ConcatSound: apply the group's flags on its first sound.
-	if (perGroupFlags() && _currentSound == 0) {
+	// ConcatSound: apply the group's flags on its first sound. Nancy16 applies
+	// them once the group has finished instead, see execute().
+	if (perGroupFlags() && _currentSound == 0 && g_nancy->getGameType() < kGameTypeNancy16) {
 		for (const FlagDescription &flag : group.flags) {
 			NancySceneState.setEventFlag(flag);
 		}
 	}
 
-	// The whole group is subtitled at once, as its first sound starts.
-	if (_currentSound == 0) {
+	// The whole group is subtitled at once, as its first sound starts. Nancy16
+	// captions every sound separately, in the narration panel.
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		showNarrationCaption(sound.name);
+	} else if (_currentSound == 0) {
 		showGroupSubtitle();
 	}
 
@@ -679,6 +758,18 @@ void ConcatMultiSound::execute() {
 		}
 
 		if (_currentSound >= _groups[_currentGroup].sounds.size()) {
+			if (perGroupFlags() && g_nancy->getGameType() >= kGameTypeNancy16) {
+				// The last group's flags can end the stream that owns this
+				// record, so its caption is cleared first
+				if (_currentGroup + 1 >= _groups.size()) {
+					clearNarrationCaption();
+				}
+
+				for (const FlagDescription &flag : _groups[_currentGroup].flags) {
+					NancySceneState.setEventFlag(flag);
+				}
+			}
+
 			++_currentGroup;
 			_currentSound = 0;
 			_soundStarted = false;
@@ -700,6 +791,13 @@ void ConcatMultiSound::execute() {
 
 		break;
 	case kActionTrigger:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			clearNarrationCaption();
+			if (NDUIPanel *convo = NancySceneState.getConversationPanel()) {
+				convo->convoClose();
+			}
+		}
+
 		if (_exitSceneID != kNoScene) {
 			SceneChangeDescription desc;
 			desc.sceneID = _exitSceneID;

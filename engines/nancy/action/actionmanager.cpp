@@ -29,6 +29,7 @@
 #include "engines/nancy/sound.h"
 #include "engines/nancy/font.h"
 #include "engines/nancy/graphics.h"
+#include "engines/nancy/puzzledata.h"
 
 #include "engines/nancy/puzzledata.h"
 
@@ -48,6 +49,11 @@ ActionManager::~ActionManager() {
 
 void ActionManager::handleInput(NancyInput &input) {
 	bool setHoverCursor = false;
+
+	// First record that refused the click on a cursor dependency. The "can't use
+	// that" sound is deferred until no record on that point accepts the click.
+	ActionRecord *cantRecord = nullptr;
+
 	for (auto &rec : _records) {
 		if (rec->_isActive && !rec->_isDone) {
 			// First, loop through all records and handle special cases.
@@ -57,6 +63,9 @@ void ActionManager::handleInput(NancyInput &input) {
 		}
 	}
 
+	// Record order is the click priority, lowest index first, in Nancy16 too.
+	// The data relies on it: specific hotspots come before a catch-all, and
+	// conditional blockers come before the hotspots they override.
 	for (auto &rec : _records) {
 		if (	rec->_isActive &&
 				!rec->_isDone &&
@@ -71,20 +80,21 @@ void ActionManager::handleInput(NancyInput &input) {
 			}
 
 			if (input.input & NancyInput::kLeftMouseButtonUp) {
-				input.input &= ~NancyInput::kLeftMouseButtonUp;
-
 				rec->_cursorDependency = nullptr;
 				processDependency(rec->_dependencies, *rec, false);
 
 				if (!rec->_dependencies.satisfied) {
-					if (rec->_cursorDependency != nullptr) {
-						NancySceneState.playItemCantSound(
-							rec->_cursorDependency->label,
-							(g_nancy->getGameType() <= kGameTypeNancy2 && rec->_cursorDependency->condition == kCursInvNotHolding));
-					} else {
-						continue;
+					// A live record can only refuse a click on its cursor dependency, i.e.
+					// the wrong item is held. Offer the click to the next record on the
+					// same point instead of swallowing it.
+					if (rec->_cursorDependency != nullptr && cantRecord == nullptr) {
+						cantRecord = rec;
 					}
+
+					continue;
 				} else {
+					input.input &= ~NancyInput::kLeftMouseButtonUp;
+					cantRecord = nullptr;
 					rec->_state = ActionRecord::ExecutionState::kActionTrigger;
 
 					input.eatMouseInput();
@@ -93,7 +103,25 @@ void ActionManager::handleInput(NancyInput &input) {
 						int16 item = rec->_cursorDependency->label;
 
 						// Re-add the object to the inventory unless it's marked as a one-time use
-						if (item == NancySceneState.getHeldItem() && item != -1) {
+						if (item == NancySceneState.getHeldItem() && item != -1 &&
+								g_nancy->getGameType() >= kGameTypeNancy16) {
+							// Nancy16 replaced INV with INVD, which has a single keepItem
+							// bit per item.
+							const INVD *invd = (const INVD *)g_nancy->getEngineData("INVD");
+							bool keep = true;
+							if (invd) {
+								for (uint k = 0; k < invd->items.size(); ++k) {
+									if (invd->items[k].id == (uint16)item) {
+										keep = invd->items[k].keepItem();
+										break;
+									}
+								}
+							}
+
+							if (!keep) {
+								NancySceneState.setHeldItem(-1);
+							}
+						} else if (item == NancySceneState.getHeldItem() && item != -1) {
 							auto *inventoryData = GetEngineData(INV);
 							assert(inventoryData);
 
@@ -124,6 +152,17 @@ void ActionManager::handleInput(NancyInput &input) {
 			}
 		}
 	}
+
+	// Nothing on that point took the click, and at least one record refused it
+	// because of what was held.
+	if (cantRecord != nullptr && cantRecord->_cursorDependency != nullptr &&
+			(input.input & NancyInput::kLeftMouseButtonUp)) {
+		input.input &= ~NancyInput::kLeftMouseButtonUp;
+		NancySceneState.playItemCantSound(
+			cantRecord->_cursorDependency->label,
+			(g_nancy->getGameType() <= kGameTypeNancy2 &&
+			 cantRecord->_cursorDependency->condition == kCursInvNotHolding));
+	}
 }
 
 // Timer dependencies that can take their seconds from the BSUM timer durations table
@@ -145,6 +184,9 @@ void ActionManager::addNewActionRecord(Common::SeekableReadStream &inputData, co
 	_records.push_back(newRecord);
 }
 
+// Width of the Nancy16+ "EndOfDeps" field that terminates the dependency block
+static const uint kEndOfDepsSize = 32;
+
 ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &inputData) {
 	inputData.seek(0);
 	char descBuf[0x30];
@@ -152,6 +194,26 @@ ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &
 	descBuf[0x2F] = '\0';
 	byte ARType = inputData.readByte();
 	byte execType = inputData.readByte();
+
+	// Nancy16 moved the dependency block to the start of the record, with a
+	// count and an "EndOfDeps" terminator. Skip it so readData() starts at the
+	// payload; the dependencies are parsed once the record exists.
+	int64 headDepsOffset = -1;
+	uint headNumDeps = 0;
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		headNumDeps = inputData.readUint32LE();
+		headDepsOffset = inputData.pos();
+		inputData.skip(headNumDeps * 16);
+
+		char sentinel[kEndOfDepsSize];
+		inputData.read(sentinel, kEndOfDepsSize);
+		sentinel[kEndOfDepsSize - 1] = '\0';
+		if (Common::String(sentinel) != "EndOfDeps") {
+			warning("Action record '%s' has %u dependencies but no EndOfDeps marker", descBuf, headNumDeps);
+			return nullptr;
+		}
+	}
+
 	ActionRecord *newRecord = createActionRecord(ARType, &inputData);
 
 	if (!newRecord) {
@@ -164,13 +226,39 @@ ActionRecord *ActionManager::createAndLoadNewRecord(Common::SeekableReadStream &
 
 	newRecord->readData(inputData);
 
+	// A record whose class does not match this game's numbering reads past the
+	// end of its chunk; skip it with a warning rather than crash.
+	if (inputData.eos() || inputData.pos() > inputData.size()) {
+		warning("Action record '%s' (type %u) read past the end of its chunk as %s; skipping it",
+			descBuf, ARType, newRecord->getRecordTypeName().c_str());
+		delete newRecord;
+		return nullptr;
+	}
+
+	if (headDepsOffset >= 0 && inputData.pos() != inputData.size()) {
+		debugC(1, kDebugActionRecord, "Action record '%s' (type %u) read as %s used %d of %d bytes",
+			descBuf, ARType, newRecord->getRecordTypeName().c_str(),
+			(int)inputData.pos(), (int)inputData.size());
+	}
+
 	// If the remaining data is less than the total data, there must be dependencies at the end of the chunk
 	int64 dataRemaining = inputData.size() - inputData.pos();
-	if (dataRemaining > 0 && newRecord->getRecordTypeName() != "Unimplemented") {
-		// Each dependency is 12 (up to nancy2) or 16 (nancy3 and up) bytes long
-		uint singleDepSize = g_nancy->getGameType() <= kGameTypeNancy2 ? 12 : 16;
-		uint numDependencies = dataRemaining / singleDepSize;
-		if (dataRemaining % singleDepSize) {
+	uint singleDepSize = g_nancy->getGameType() <= kGameTypeNancy2 ? 12 : 16;
+	uint numDependencies = 0;
+	bool haveDeps = false;
+
+	if (headDepsOffset >= 0) {
+		// Nancy16+: rewind to the block we skipped above
+		inputData.seek(headDepsOffset);
+		numDependencies = headNumDeps;
+		haveDeps = true;
+	} else if (dataRemaining > 0 && newRecord->getRecordTypeName() != "Unimplemented") {
+		numDependencies = dataRemaining / singleDepSize;
+		haveDeps = true;
+	}
+
+	if (haveDeps) {
+		if (headDepsOffset < 0 && dataRemaining % singleDepSize) {
 			warning("Action record type %u, %s has incorrect read size!\ndescription:\n%s",
 				newRecord->_type,
 				newRecord->getRecordTypeName().c_str(),
@@ -275,16 +363,29 @@ void ActionManager::processActionRecords() {
 			record->execute();
 		}
 
-		if (g_nancy->getGameType() >= kGameTypeNancy4 && NancySceneState.getState() == State::Scene::kLoad) {
-			// changeScene() must have been called, abort any further processing.
+		if (g_nancy->getGameType() >= kGameTypeNancy4 &&
+			g_nancy->getGameType() < kGameTypeNancy16 &&
+			NancySceneState.getState() == State::Scene::kLoad) {
+			// Nancy16 queues the destination until the next scene tick, and later
+			// NDUI records in this pass may still need to run.
+			// Earlier games abort further processing after changeScene().
 			// Both old and new behavior is needed (nancy3 intro narration, nancy4 garden gate)
 			return;
 		}
 	}
 
 	synchronizeMovieWithSound();
-	debugDrawHotspots();
+
+	// The hotspot overlay is a single shared RenderObject. A concurrent Nancy16
+	// stream has no hotspots and would only wipe the main flow's boxes off it.
+	if (!NancySceneState.getStreams().executing()) {
+		debugDrawHotspots();
+	}
 }
+
+// Nancy16 reuses dependency types 13 and 14 for a player-table value comparison:
+// label is a table value index, condition is the operator, and the time fields
+// carry the number compared against. Timer comparisons use dependency type 25.
 
 // How a player time dependency compares the clock against its time. Titles
 // before nancy3 have no condition, and always wait for the time to pass.
@@ -302,7 +403,8 @@ enum ValueTestComparison {
 	kValueGreater			= 1,
 	kValueGreaterOrEqual	= 2,
 	kValueLess				= 3,
-	kValueLessOrEqual		= 4
+	kValueLessOrEqual		= 4,
+	kValueNotEqual			= 5		// Nancy16+
 };
 
 // A value-table test dependency with this in its hours field compares against
@@ -333,7 +435,7 @@ static int32 getValueTestValue(const TableData &table, int16 index, int32 defaul
 // it against the fighters' health. Type 13 was Nancy11's software-timer less-than
 // check; Nancy12 moved the timer checks to types 22-25, freeing it. Type 14 is
 // unused from Nancy12 on (the original aborts on it).
-static bool evaluateValueTestDependency(const DependencyRecord &dep) {
+bool evaluateValueTestDependency(const DependencyRecord &dep) {
 	TableData *table = (TableData *)NancySceneState.getPuzzleData(TableData::getTag());
 	assert(table);
 
@@ -363,6 +465,8 @@ static bool evaluateValueTestDependency(const DependencyRecord &dep) {
 		return value < threshold;
 	case kValueLessOrEqual:
 		return value <= threshold;
+	case kValueNotEqual:
+		return value != threshold;
 	default:
 		return false;
 	}
@@ -481,7 +585,8 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 			break;
 		case DependencyType::kElapsedSceneTime:
-			if (NancySceneState._timers.sceneTime >= dep.timeData) {
+			// Inside a Nancy16 stream this is the stream's own clock
+			if (NancySceneState.getFlowSceneTime() >= dep.timeData) {
 				dep.satisfied = true;
 			} else {
 				dep.satisfied = false;
@@ -536,6 +641,10 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 			// Note: nancy7 completely flipped the meaning of 1 and 2
 			int count = NancySceneState.getSceneCounts(dep.hours);
 			switch (dep.milliseconds) {
+			case 0:
+				// Nancy16 uses selector 0 for equality
+				dep.satisfied = (dep.minutes == count);
+				break;
 			case 1:
 				if (	(dep.minutes < count && g_nancy->getGameType() <= kGameTypeNancy6) ||
 						(dep.minutes > count && g_nancy->getGameType() >= kGameTypeNancy7)) {
@@ -555,12 +664,11 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 				break;
 			case 3:
-				if (dep.minutes == count) {
-					dep.satisfied = true;
-				} else {
-					dep.satisfied = false;
-				}
-
+				// count <= threshold, the complement of selector 2
+				dep.satisfied = (count <= dep.minutes);
+				break;
+			default:
+				dep.satisfied = false;
 				break;
 			}
 
@@ -608,7 +716,11 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 			} else {
 				bool isSatisfied = false;
 				int heldItem = NancySceneState.getHeldItem();
-				if (heldItem == -1 && dep.label == kCursStandard) {
+				if (g_nancy->getGameType() >= kGameTypeNancy16) {
+					// Nancy16 restores the holding/not-holding condition:
+					// condition 1 means holding the item.
+					isSatisfied = (heldItem == dep.label) == (dep.condition == 1);
+				} else if (heldItem == -1 && dep.label == kCursStandard) {
 					isSatisfied = true;
 				} else {
 					if (g_nancy->getGameType() <= kGameTypeNancy2 && dep.condition == kCursInvNotHolding) {
@@ -663,7 +775,10 @@ void ActionManager::processDependency(DependencyRecord &dep, ActionRecord &recor
 
 			break;
 		case DependencyType::kTimerGreaterThanDependencyTime:
-			if (g_nancy->getGameType() >= kGameTypeNancy11) {
+			if (g_nancy->getGameType() >= kGameTypeNancy16) {
+				// A value-table test in Nancy16, like type 13 since Nancy14
+				dep.satisfied = evaluateValueTestDependency(dep);
+			} else if (g_nancy->getGameType() >= kGameTypeNancy11) {
 				dep.satisfied = NancySceneState.isSoftwareTimerActive(dep.label) &&
 					(uint32)dep.timeData < NancySceneState.getSoftwareTimerElapsed(dep.label);
 			} else {

@@ -78,6 +78,9 @@ public:
 	void readData(Common::SeekableReadStream &stream) override;
 	void execute() override;
 
+	// Nancy16 fades set an event flag when they end
+	FlagDescription _flagOnCompletion;
+
 	byte _type = 1;
 	uint16 _fadeToBlackTime = 0;
 	uint16 _frameTime = 0;
@@ -313,6 +316,9 @@ protected:
 // software-timer slot index (see TimerControl). From Nancy 12 the record became
 // a general "Control a Timer" command: a slot index plus a command whose value
 // selects a variable-size payload.
+// Nancy16 only changes the configure payload. A configured slot fires its event
+// flags when its duration elapses; a slot started with no duration is a
+// stopwatch read by kTimerAboveDependencyTime.
 class ResetAndStartTimer : public ActionRecord {
 public:
 	enum Command {
@@ -339,6 +345,9 @@ public:
 	Common::Array<FlagDescription> _flags; // Fired on expiry when configured
 
 protected:
+	// Nancy16 replaced the fixed sound block with the counted SoundGroup idiom
+	void readNancy16Data(Common::SeekableReadStream &stream);
+
 	Common::String getRecordTypeName() const override { return "ResetAndStartTimer"; }
 };
 
@@ -564,6 +573,198 @@ protected:
 
 	byte _characterIndex = 0;	// index into the PCUI character list
 	Common::Path _videoFile;	// replacement scene background, empty to keep the current one
+};
+
+// Applies one NDUI command to a named widget. Nancy16+ only.
+//   uint32   commandID     8 set/enable, 9 clear/disable, 2 hide, 1 show, 50, 51
+//   char[33] target        widget name: ShowPDA, ShowInv, ShowJournal, ...
+//   byte[41] always zero
+class NDUIControl : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "NDUIControl"; }
+
+	uint32 _commandID = 0;
+	Common::String _target;
+};
+
+// Nancy16 reuses type 114 (RotatingLockPuzzle in earlier games) for a named
+// save point. The payload is a 33-byte slot name such as "Start_Game".
+class SaveNamedGame : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SaveNamedGame"; }
+
+	Common::String _slotName;
+};
+
+// Nancy16 type 115 (LeverPuzzle in earlier games) loads the checkpoint a
+// type 114 record saved under the same name. The second-chance screens use it
+// directly, without a menu.
+class LoadNamedGame : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "LoadNamedGame"; }
+
+	Common::String _slotName;
+};
+
+// Nancy16 type 108 (GotoMenu in Nancy7-15) deletes a named checkpoint.
+// Same 33-byte name payload as types 114 and 115.
+class ClearNamedGame : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "ClearNamedGame"; }
+
+	Common::String _slotName;
+};
+
+// Nancy15 type 134, "Change player character". The payload is a 33-byte
+// character name; each character has its own UI tree, listed in the BOOT chunk PCUI.
+// TODO: swap the loaded NDUI tree. For now the name is only validated against PCUI.
+class ChangePlayerCharacter : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "ChangePlayerCharacter"; }
+
+	Common::String _characterName;
+};
+
+// Nancy16 type 18, "Scene Change, Frame and Flags": the 6-byte scene core,
+// then a counted list of 4-byte flag entries.
+class SceneChangeWithFlags : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "SceneChangeWithFlags"; }
+
+	SceneChangeDescription _sceneChange;
+	MultiEventFlagDescription _flags;
+};
+
+// Nancy16 type 209, "Typewriter Text", used for the game-over cards.
+//   char[33] AUTOTEXT key
+//   RECT     destination box, viewport coordinates
+//   double   typing speed, assumed to be milliseconds per character
+//   uint32   FONT chunk id
+//   uint32   COLR chunk id used when the string sets no colour of its own
+//   RandomSoundBlock  key-click sounds
+//   int16 label + byte flag    event flag raised when the text is finished
+class TypewriterText : public RenderActionRecord {
+public:
+	TypewriterText() : RenderActionRecord(8) {}
+	virtual ~TypewriterText() {}
+
+	void init() override;
+	void updateGraphics() override;
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+	bool isViewportRelative() const override { return true; }
+
+protected:
+	Common::String getRecordTypeName() const override { return "TypewriterText"; }
+	Common::String getRecordExtraInfo() const override;
+
+	void redraw();
+	void playKeyClick();
+	void raiseDoneFlag();
+
+	Common::String _textKey;
+	Common::Rect _dest;
+	double _charTime = 60.0;
+	uint32 _fontID = 0;
+	uint32 _colourID = 0;
+	RandomSoundBlock _keySounds;
+	FlagDescription _doneFlag;
+
+	Common::String _text;
+	Common::Rect _clipped;
+	uint _numChars = 0;
+	uint _shown = 0;
+	uint32 _startTime = 0;
+	bool _initialised = false;
+	bool _typingDone = false;
+};
+
+// Nancy16 type 93, "Detecting main stream scene changes": a 33-byte stream name
+// and an event flag set when that stream changes scene. Ambient scripts use it
+// to re-run whenever the player moves. A watcher on a missing stream never fires.
+class DetectStreamSceneChange : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "DetectStreamSceneChange"; }
+	Common::String getRecordExtraInfo() const override;
+
+	Common::String _streamName;
+	FlagDescription _flag;
+
+	uint32 _watchedCountAtStart = 0;
+};
+
+// Nancy16 type 27, "End a stream": the 33-byte name of the stream to end. An
+// empty name ends the stream this record belongs to; see StreamManager::end().
+class EndStream : public ActionRecord {
+public:
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override { return "EndStream"; }
+	Common::String getRecordExtraInfo() const override;
+
+	Common::String _streamName;
+};
+
+// Nancy16 records that are read but not acted on yet.
+//   type 25  "Scene Change with The Works"  69 + (uint16@49 - 1) * 18 bytes
+//   type 42  "Random Movie/Fidget"          same layout as 43
+//   type 43  "Random Movie/Fidget"
+//   type 53  "rollover overlay"
+//   type 54  "Static Overlay Image"
+class Nancy16ConsumeOnly : public ActionRecord {
+public:
+	enum Shape {
+		kSceneChangeTheWorks, kFixedSize, kCountedTail,
+		kRandomMovieGraph, kRolloverOverlay, kStaticOverlayImage,
+		kPaperDollPuzzle
+	};
+
+	Nancy16ConsumeOnly(Shape shape) : _shape(shape) {}
+
+	// Fixed-size variant: skips `size` bytes
+	Nancy16ConsumeOnly(uint size) : _shape(kFixedSize), _size(size) {}
+
+	void readData(Common::SeekableReadStream &stream) override;
+	void execute() override;
+
+protected:
+	Common::String getRecordTypeName() const override;
+
+	Shape _shape;
+	uint _size = 0;
+	Common::String _name;
 };
 
 } // End of namespace Action

@@ -51,6 +51,11 @@ public:
 	void redrawAll();
 	void suppressNextDraw();
 
+	// Nancy16+ background colour shown wherever no object paints, stored as ARGB.
+	// Always opaque, so translucent objects blend against it correctly.
+	void setMatteColour(uint32 argb) { _matteColour = argb | 0xff000000; }
+	uint32 getMatteColour() const { return _matteColour; }
+
 	const Font *getFont(uint id) const { return id < _fonts.size() ? &_fonts[id] : nullptr; }
 	const Graphics::Screen *getScreen() { return &_screen; }
 
@@ -101,6 +106,9 @@ private:
 	Common::HashMap<uint16, Common::Rect> _autotextSurfaceBounds;
 
 	uint32 _transColor = 0;
+
+	// Black by default, as in the game's INI
+	uint32 _matteColour = 0xff000000;
 
 	bool _isSuppressed;
 };

@@ -32,6 +32,14 @@ namespace Nancy {
 namespace Action {
 
 void SceneChange::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && _type == 15) {
+		// Nancy16's type 15 carries only a scene id
+		_sceneChange.sceneID = stream.readUint16LE();
+		_sceneChange.frameID = 0;
+		_sceneChange.continueSceneSound = kContinueSceneSound;
+		return;
+	}
+
 	_sceneChange.readData(stream);
 }
 
@@ -139,7 +147,16 @@ void Hot1FrSceneChange::readData(Common::SeekableReadStream &stream) {
 
 	if (!_isTerse) {
 		SceneChange::readData(stream);
-		_hotspotDesc.readData(stream);
+
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// Nancy16 replaced the hotspot frame id with a 32-bit cursor id
+			_hoverCursor = (CursorManager::CursorType)stream.readUint32LE();
+			_dynamicCursor = true;
+			_hotspotDesc.frameID = 0;
+			readRect(stream, _hotspotDesc.coords);
+		} else {
+			_hotspotDesc.readData(stream);
+		}
 	} else {
 		_sceneChange.sceneID = stream.readUint16LE();
 		if (g_nancy->getGameType() >= kGameTypeNancy10 && _dynamicCursor) {
@@ -445,6 +462,56 @@ void MapCallHotMultiframe::execute() {
 		MapCall::execute();
 		break;
 	}
+}
+
+void SceneChangeTheWorks::readData(Common::SeekableReadStream &stream) {
+	SceneChange::readData(stream);
+
+	Common::String unusedName;	// always empty
+	readFilename(stream, unusedName);
+	stream.skip(2);				// always 1
+
+	_flag.label = stream.readSint16LE();
+	_flag.flag = (byte)stream.readUint16LE();
+	_hoverCursor = (CursorManager::CursorType)stream.readUint32LE();
+
+	const uint16 numHotspots = stream.readUint16LE();
+	_hotspots.resize(numHotspots);
+	for (uint i = 0; i < numHotspots; ++i) {
+		_hotspots[i].readData(stream);
+	}
+}
+
+void SceneChangeTheWorks::execute() {
+	if (_state == kActionTrigger) {
+		NancySceneState.setEventFlag(_flag);
+	}
+
+	HotMultiframeSceneChange::execute();
+}
+
+void SceneChangeWithStream::readData(Common::SeekableReadStream &stream) {
+	_sceneChange.readData(stream);
+	readFilename(stream, _streamName);
+}
+
+void SceneChangeWithStream::execute() {
+	if (_streamName.empty() || _streamName.equalsIgnoreCase("MainStream")) {
+		// Change the main flow directly, bypassing the stream redirect
+		NancySceneState.changeScene(_sceneChange, true);
+		_isDone = true;
+		return;
+	}
+
+	Stream *target = NancySceneState.getStreams().find(_streamName);
+	if (target) {
+		target->requestSceneChange(_sceneChange);
+	} else {
+		debugC(1, kDebugActionRecord, "Ignoring scene change addressed to stream '%s', which is not running",
+			_streamName.c_str());
+	}
+
+	_isDone = true;
 }
 
 } // End of namespace Action

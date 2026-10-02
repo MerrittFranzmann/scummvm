@@ -34,7 +34,14 @@ namespace Action {
 void AddInventoryNoHS::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
 
-	if (g_nancy->getGameType() >= kGameTypeNancy15) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// The name of the character who gains the item, then one unknown byte
+		Common::String owner;
+		readFilename(stream, owner);
+		stream.skip(1);
+		_setCursor = false;
+		_forceCursor = false;
+	} else if (g_nancy->getGameType() >= kGameTypeNancy15) {
 		// The character the item goes to took the first half of the cursor flag
 		_characterIndex = stream.readByte();
 		_setCursor = stream.readByte();
@@ -57,7 +64,11 @@ void AddInventoryNoHS::execute() {
 void RemoveInventoryNoHS::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
 
-	if (g_nancy->getGameType() >= kGameTypeNancy15) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// The name of the character who loses the item
+		Common::String owner;
+		readFilename(stream, owner);
+	} else if (g_nancy->getGameType() >= kGameTypeNancy15) {
 		_characterIndex = stream.readByte();
 	}
 }
@@ -224,10 +235,25 @@ void PopInvViewPriorScene::execute() {
 
 void GoInvViewScene::readData(Common::SeekableReadStream &stream) {
 	_itemID = stream.readUint16LE();
+
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Nancy16 dropped the trailing flag
+		_addToInventory = false;
+		return;
+	}
+
 	_addToInventory = stream.readUint16LE();
 }
 
 void GoInvViewScene::execute() {
+	// Nancy16 has no INV chunk; the item view scenes are in INVD
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		// Shared with the NDUI inventory buttons
+		NancySceneState.openItemViewScene(_itemID);
+		_isDone = true;
+		return;
+	}
+
 	auto *inv = GetEngineData(INV);
 	assert(inv);
 
