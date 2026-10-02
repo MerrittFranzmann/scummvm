@@ -19,6 +19,7 @@
  *
  */
 
+#include "common/config-manager.h"
 #include "common/random.h"
 
 #include "engines/nancy/nancy.h"
@@ -35,6 +36,22 @@
 namespace Nancy {
 namespace Action {
 
+// The Nancy16 counted sound group: uint16 count, count x char[33], uint16
+// channel, uint32, uint16 volume. Only the first name is used.
+static void readSoundGroup(Common::SeekableReadStream &stream, SoundDescription &desc) {
+	RandomSoundBlock block;
+	block.readData(stream);
+
+	if (block.names.empty()) {
+		return;
+	}
+
+	desc.name = block.names[0];
+	desc.channelID = block.channel;
+	desc.numLoops = block.numLoops > 0 ? block.numLoops : 1;
+	desc.volume = block.volume;
+}
+
 void RotatingLockPuzzle::init() {
 	_drawSurface.create(_screenPosition.width(), _screenPosition.height(), g_nancy->_graphics->getInputPixelFormat());
 	_drawSurface.clear(g_nancy->_graphics->getTransColor());
@@ -44,7 +61,108 @@ void RotatingLockPuzzle::init() {
 	g_nancy->_resource->loadImage(_imageName, _image);
 }
 
+// Nancy16 rewrote the record: the icon count now comes before the dial count,
+// the scene changes use the short 7-byte "scene, frame, flag, value" block,
+// the sounds are counted sound groups, and the exit hotspot is in the 23-byte
+// action-zone tail.
+void RotatingLockPuzzle::readNancy16Data(Common::SeekableReadStream &stream) {
+	readFilename(stream, _imageName);
+
+	_iconsPerDial = stream.readUint16LE();
+	readRectArray(stream, _srcRects, _iconsPerDial);
+
+	const uint numDials = stream.readUint16LE();
+	readRectArray(stream, _destRects, numDials);
+	for (uint i = 0; i < numDials; ++i) {
+		if (i == 0) {
+			_screenPosition = _destRects[i];
+		} else {
+			_screenPosition.extend(_destRects[i]);
+		}
+	}
+
+	// Eight unused bytes, then the two hotspot lists. Both hold numDials + 1
+	// entries with an empty one in slot 0, so dial i uses entry i + 1.
+	stream.skip(8);
+
+	Common::Array<Common::Rect> allUp, allDown;
+	readRectArray(stream, allUp, numDials + 1);
+	readRectArray(stream, allDown, numDials + 1);
+	for (uint i = 0; i < numDials; ++i) {
+		_upHotspots.push_back(allUp[i + 1]);
+		_downHotspots.push_back(allDown[i + 1]);
+	}
+
+	_correctSequence.resize(numDials);
+	for (uint i = 0; i < numDials; ++i) {
+		_correctSequence[i] = stream.readByte();
+	}
+
+	stream.skip(8 - numDials);
+
+	_upCursorType = (CursorManager::CursorType)stream.readUint16LE();
+	_downCursorType = (CursorManager::CursorType)stream.readUint16LE();
+
+	readSoundGroup(stream, _clickSound);
+
+	// Unknown. Reads as a flag label and value, but not this puzzle's flag, so
+	// it is not applied.
+	stream.skip(3);
+
+	_solveScene._sceneChange.sceneID = stream.readUint16LE();
+	if (_solveScene._sceneChange.sceneID == kNancy16NoScene) {
+		_solveScene._sceneChange.sceneID = kNoScene;
+	}
+
+	_solveScene._sceneChange.frameID = stream.readUint16LE();
+	_solveScene._sceneChange.continueSceneSound = kContinueSceneSound;
+	_solveScene._flag.label = stream.readSint16LE();
+	_solveScene._flag.flag = stream.readByte();
+
+	readSoundGroup(stream, _solveSound);
+	_solveSoundDelay = 0;
+
+	// The action-zone tail. The single zone is the strip along the bottom of the
+	// viewport that gives up.
+	const uint16 numZones = stream.readUint16LE();
+	for (uint i = 0; i < numZones; ++i) {
+		Common::Rect hotspot;
+		readRect(stream, hotspot);
+		const uint16 cursorType = stream.readUint16LE();
+		uint16 sceneID = stream.readUint16LE();
+		if (sceneID == kNancy16NoScene) {
+			sceneID = kNoScene;
+		}
+
+		const int16 flagLabel = stream.readSint16LE();
+		const byte flagValue = stream.readByte();
+
+		if (i == 0) {
+			_exitHotspot = hotspot;
+			_exitCursorType = cursorType;
+			_exitScene._sceneChange.sceneID = sceneID;
+			_exitScene._sceneChange.continueSceneSound = kContinueSceneSound;
+			_exitScene._flag.label = flagLabel;
+			_exitScene._flag.flag = flagValue;
+		}
+	}
+
+	debugC(1, kDebugScene, "RotatingLockPuzzle: \"%s\", %u dials of %u icons, solution %u/%u/%u/%u, "
+			"solve scene %u flag %d (%s), exit scene %u",
+			_imageName.toString().c_str(), numDials, _iconsPerDial,
+			numDials > 0 ? _correctSequence[0] : 0, numDials > 1 ? _correctSequence[1] : 0,
+			numDials > 2 ? _correctSequence[2] : 0, numDials > 3 ? _correctSequence[3] : 0,
+			_solveScene._sceneChange.sceneID, _solveScene._flag.label,
+			g_nancy->getEventFlagName(_solveScene._flag.label).c_str(),
+			_exitScene._sceneChange.sceneID);
+}
+
 void RotatingLockPuzzle::readData(Common::SeekableReadStream &stream) {
+	if (g_nancy->getGameType() >= kGameTypeNancy16) {
+		readNancy16Data(stream);
+		return;
+	}
+
 	const bool isNancy10 = g_nancy->getGameType() >= kGameTypeNancy10;
 
 	readFilename(stream, _imageName);
@@ -157,6 +275,20 @@ void RotatingLockPuzzle::readData(Common::SeekableReadStream &stream) {
 	}
 }
 
+bool RotatingLockPuzzle::isSolved() const {
+	if (_currentSequence.size() < _correctSequence.size()) {
+		return false;
+	}
+
+	for (uint i = 0; i < _correctSequence.size(); ++i) {
+		if (_currentSequence[i] != _correctSequence[i]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 void RotatingLockPuzzle::execute() {
 	const bool isNancy10 = g_nancy->getGameType() >= kGameTypeNancy10;
 
@@ -190,10 +322,9 @@ void RotatingLockPuzzle::execute() {
 	case kRun:
 		switch (_solveState) {
 		case kNotSolved:
-			for (uint i = 0; i < _correctSequence.size(); ++i) {
-				if (_currentSequence[i] != (int16)_correctSequence[i]) {
-					return;
-				}
+
+			if (!isSolved()) {
+				return;
 			}
 
 			_solveSoundPlayTime = g_nancy->getTotalPlayTime() + _solveSoundDelay * 1000;

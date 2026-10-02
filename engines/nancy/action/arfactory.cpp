@@ -586,6 +586,11 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 155: // StopAndUnloadSound, but we always unload
 		return new StopSound();
 	case 156:	// Nancy11
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Rotating Lock", with a rewritten Nancy16 record
+			return new RotatingLockPuzzle();
+		}
+
 		return new Update3DSound();
 	case 157:
 		if (g_nancy->getGameType() >= kGameTypeNancy16) {

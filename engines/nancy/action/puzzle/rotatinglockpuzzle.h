@@ -66,7 +66,11 @@ public:
 protected:
 	Common::String getRecordTypeName() const override { return "RotatingLockPuzzle"; }
 
+	void readNancy16Data(Common::SeekableReadStream &stream);
 	void drawDial(uint id);
+
+	// Every dial sits on its target
+	bool isSolved() const;
 };
 
 } // End of namespace Action
