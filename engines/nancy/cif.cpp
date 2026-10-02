@@ -348,8 +348,26 @@ CifTree *CifTree::makeCifTreeArchive(const Common::String &name, const Common::S
 		return nullptr;
 	}
 
-	Common::Serializer ser(headerStream, nullptr);
-	bool synced = ret->sync(ser);
+	bool synced = false;
+
+	// Nancy16 trees are a version 3 container tagged "CIF FILE" rather than
+	// "CIF TREE", with the index at the end of the file
+	char magic[24];
+	if (g_nancy->getGameType() >= kGameTypeNancy16 && headerStream->read(magic, sizeof(magic)) == sizeof(magic) &&
+			memcmp(magic, "CIF FILE HerInteractive", sizeof(magic)) == 0) {
+		const uint16 hi = headerStream->readUint16LE();
+		headerStream->readUint16LE(); // Version low bytes
+		if (hi == 3) {
+			synced = ret->syncV3(*headerStream);
+		} else {
+			warning("Unsupported version %d found in CifTree '%s'", hi, path.toString().c_str());
+		}
+	} else {
+		headerStream->seek(0);
+		Common::Serializer ser(headerStream, nullptr);
+		synced = ret->sync(ser);
+	}
+
 	ret->closeStream(headerStream);
 
 	if (!synced) {
@@ -408,6 +426,132 @@ bool CifTree::sync(Common::Serializer &ser) {
 		}
 	}
 
+	return true;
+}
+
+// Layout of the version 3 container introduced in Nancy16:
+//
+//   [28]  outer header ("CIF FILE HerInteractive\0", uint16 hi = 3, uint16 ver)
+//         member records, each:
+//           [24]  "CIF FILE HerInteractive\0"
+//           [4]   uint16 hi, uint16 ver
+//           [20]  uint32 type, width, height, comp, size
+//           [size] payload
+//   index:
+//           [4]   uint32 member count
+//           [37 * count]  char name[33], uint32 record offset
+//   [4]   uint32 index size (not counting these trailing 4 bytes)
+// Payloads are never compressed: images are PNG and scripts plain IFF.
+static const uint32 kV3NameFieldSize = 33;
+static const uint32 kV3IndexEntrySize = kV3NameFieldSize + 4;
+static const uint32 kV3RecordHeaderSize = 48;
+
+bool CifTree::syncV3(Common::SeekableReadStream &stream) {
+	const int64 fileSize = stream.size();
+	if (fileSize < 4) {
+		warning("CifTree '%s' is too small to contain a v3 index", _name.toString().c_str());
+		return false;
+	}
+
+	if (!stream.seek(fileSize - 4)) {
+		return false;
+	}
+
+	const uint32 indexSize = stream.readUint32LE();
+	if (indexSize < 4 || (int64)indexSize + 4 > fileSize) {
+		warning("CifTree '%s' has an out-of-range v3 index size of %d", _name.toString().c_str(), indexSize);
+		return false;
+	}
+
+	const int64 indexOffset = fileSize - 4 - indexSize;
+	if (!stream.seek(indexOffset)) {
+		return false;
+	}
+
+	// Check the entry count by dividing, since a multiply could overflow
+	if ((indexSize - 4) % kV3IndexEntrySize != 0) {
+		warning("CifTree '%s' has a v3 index size of %d, which is not a whole number of entries",
+			_name.toString().c_str(), indexSize);
+		return false;
+	}
+
+	const uint32 numEntries = stream.readUint32LE();
+	if (numEntries != (indexSize - 4) / kV3IndexEntrySize) {
+		warning("CifTree '%s' v3 index declares %d entries, which does not match its size of %d",
+			_name.toString().c_str(), numEntries, indexSize);
+		return false;
+	}
+
+	// Read the whole index first; each record header then needs a seek of its own.
+	Common::Array<Common::Path> names;
+	Common::Array<uint32> offsets;
+	names.reserve(numEntries);
+	offsets.reserve(numEntries);
+
+	for (uint32 i = 0; i < numEntries; ++i) {
+		char nameBuf[kV3NameFieldSize + 1];
+		if (stream.read(nameBuf, kV3NameFieldSize) != kV3NameFieldSize) {
+			warning("CifTree '%s' ran out of data while reading its v3 index", _name.toString().c_str());
+			return false;
+		}
+
+		nameBuf[kV3NameFieldSize] = '\0';
+		names.push_back(Common::Path(nameBuf));
+		offsets.push_back(stream.readUint32LE());
+	}
+
+	for (uint32 i = 0; i < numEntries; ++i) {
+		if ((int64)offsets[i] + kV3RecordHeaderSize > indexOffset || !stream.seek(offsets[i])) {
+			warning("CifTree '%s' member '%s' points outside the archive", _name.toString().c_str(),
+				names[i].toString().c_str());
+			continue;
+		}
+
+		char magic[24];
+		if (stream.read(magic, 24) != 24 || memcmp(magic, "CIF FILE HerInteractive", 24) != 0) {
+			warning("CifTree '%s' member '%s' has no record header", _name.toString().c_str(),
+				names[i].toString().c_str());
+			continue;
+		}
+
+		stream.skip(4); // Per-record version, matches the container's
+
+		// These are 32-bit on disk, but CifInfo stores them narrower, so they need
+		// checking instead of truncating
+		const uint32 type = stream.readUint32LE();
+		const uint32 width = stream.readUint32LE();
+		const uint32 height = stream.readUint32LE();
+
+		if (type > 0xff || width > 0xffff || height > 0xffff) {
+			warning("CifTree '%s' member '%s' has an out-of-range type %u or size %ux%u",
+				_name.toString().c_str(), names[i].toString().c_str(), type, width, height);
+			continue;
+		}
+
+		CifInfo info;
+		info.name = names[i];
+		info.type = (CifInfo::ResType)type;
+		info.width = (uint16)width;
+		info.height = (uint16)height;
+		stream.skip(4); // comp: set on some images, but the payload is stored verbatim regardless
+		info.size = stream.readUint32LE();
+		info.comp = CifInfo::kResCompressionNone;
+		info.compressedSize = info.size;
+		info.pitch = info.width;
+		info.dataOffset = offsets[i] + kV3RecordHeaderSize;
+
+		if ((int64)info.dataOffset + info.size > indexOffset) {
+			warning("CifTree '%s' member '%s' overruns the archive", _name.toString().c_str(),
+				names[i].toString().c_str());
+			continue;
+		}
+
+		if (info.size && info.type != CifInfo::kResTypeEmpty) {
+			_fileMap.setVal(info.name, info);
+		}
+	}
+
+	debugC(1, kDebugEngine, "Loaded v3 CifTree '%s' with %d members", _name.toString().c_str(), _fileMap.size());
 	return true;
 }
 

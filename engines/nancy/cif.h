@@ -100,6 +100,10 @@ public:
 	Common::SeekableReadStream *createReadStreamRaw(const Common::Path &path) const;
 	bool sync(Common::Serializer &ser);
 
+	// Nancy16 version 3 "CIF FILE" container, with the member index at the end of
+	// the file. Reads the stream directly, since it needs random access.
+	bool syncV3(Common::SeekableReadStream &stream);
+
 	void addInfo(const CifInfo &info) { _writeFileMap.push_back(info); }
 	uint writeFileMapSize() const { return _writeFileMap.size(); }
 	uint32 getDataOffset(uint i) const { return _writeFileMap[i].dataOffset; }
