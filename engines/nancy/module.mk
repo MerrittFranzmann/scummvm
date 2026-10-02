@@ -45,6 +45,7 @@ MODULE_OBJS = \
   action/puzzle/hamradiopuzzle.o \
   action/puzzle/hangmanpuzzle.o \
   action/puzzle/lettergridpuzzle.o \
+  action/puzzle/laptoppasswordpuzzle.o \
   action/puzzle/leverpuzzle.o \
   action/puzzle/lockpickpuzzle.o \
   action/puzzle/magnetmazepuzzle.o \

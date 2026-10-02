@@ -63,6 +63,7 @@
 #include "engines/nancy/action/puzzle/hamradiopuzzle.h"
 #include "engines/nancy/action/puzzle/hangmanpuzzle.h"
 #include "engines/nancy/action/puzzle/lettergridpuzzle.h"
+#include "engines/nancy/action/puzzle/laptoppasswordpuzzle.h"
 #include "engines/nancy/action/puzzle/leverpuzzle.h"
 #include "engines/nancy/action/puzzle/lockpickpuzzle.h"
 #include "engines/nancy/action/puzzle/magnetmazepuzzle.h"
@@ -695,6 +696,13 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 	case 188:	// Nancy16
 		if (g_nancy->getGameType() >= kGameTypeNancy16) {
 			return new ChessCodePuzzle();
+		}
+
+		return nullptr;
+	case 189:	// Nancy16
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// "Quiz Puzzle": the office laptop password box (S2929)
+			return new LaptopPasswordPuzzle();
 		}
 
 		return nullptr;
