@@ -105,6 +105,7 @@
 #include "engines/nancy/action/puzzle/soundequalizerpuzzle.h"
 #include "engines/nancy/action/puzzle/soundmatchpuzzle.h"
 #include "engines/nancy/action/puzzle/spigotpuzzle.h"
+#include "engines/nancy/action/puzzle/stakeoutpuzzle.h"
 #include "engines/nancy/action/puzzle/stepobjectspuzzle.h"
 #include "engines/nancy/action/puzzle/tangrampuzzle.h"
 #include "engines/nancy/action/puzzle/telephone.h"
@@ -775,6 +776,12 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 
 		return new CollisionPuzzle(CollisionPuzzle::PuzzleType::kCollision);
 	case 212:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			// The Venice night stake-out (S5610). Its description, "UI Control", is
+			// copied from AR 34.
+			return new StakeOutPuzzle();
+		}
+
 		return new OrderingPuzzle(OrderingPuzzle::PuzzleType::kOrderItems);
 	case 213:
 		return new CollisionPuzzle(CollisionPuzzle::PuzzleType::kTileMove);
