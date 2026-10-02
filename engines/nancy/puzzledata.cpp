@@ -297,6 +297,12 @@ void GridMapPuzzleData::synchronize(Common::Serializer &ser) {
 	syncInt16Array(ser, itemState);
 }
 
+void SentryPuzzleData::synchronize(Common::Serializer &ser) {
+	ser.syncString(pendingLevel);
+	ser.syncAsSint16LE(pendingCol);
+	ser.syncAsSint16LE(pendingRow);
+}
+
 void QuizPuzzleData::synchronize(Common::Serializer &ser) {
 	// Serialize as: numSlots, then for each slot: key, numBoxes, box data
 	uint16 numSlots = (uint16)boxCorrect.size();
@@ -855,6 +861,8 @@ PuzzleData *makePuzzleData(const uint32 tag) {
 		return new MagnetMazePuzzleData();
 	case GridMapPuzzleData::getTag():
 		return new GridMapPuzzleData();
+	case SentryPuzzleData::getTag():
+		return new SentryPuzzleData();
 	case JournalData::getTag():
 		return new JournalData();
 	case TableData::getTag():

@@ -174,6 +174,18 @@ struct GridMapPuzzleData : public PuzzleData {
 // Room hand-off in the Nancy16 sentry maze. An AR 168 record names the room
 // and cell to arrive at; the AR 210 record in that room picks them up.
 // An empty pendingLevel means no hand-off is pending.
+struct SentryPuzzleData : public PuzzleData {
+	SentryPuzzleData() {}
+	virtual ~SentryPuzzleData() {}
+
+	static constexpr uint32 getTag() { return MKTAG('S', 'N', 'T', 'R'); }
+	virtual void synchronize(Common::Serializer &ser);
+
+	Common::String pendingLevel;
+	int16 pendingCol = 0;
+	int16 pendingRow = 0;
+};
+
 struct QuizPuzzleData : public PuzzleData {
 	QuizPuzzleData() {}
 	virtual ~QuizPuzzleData() {}
