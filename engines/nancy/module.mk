@@ -94,6 +94,7 @@ MODULE_OBJS = \
   action/puzzle/typingquizpuzzle.o \
   action/puzzle/weightsortpuzzle.o \
   action/puzzle/chesscodepuzzle.o \
+  action/puzzle/whackitpuzzle.o \
   action/puzzle/whalesurvivorpuzzle.o \
   action/puzzle/wordfindpuzzle.o \
   ui/fullscreenimage.o \

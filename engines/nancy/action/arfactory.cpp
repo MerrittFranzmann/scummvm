@@ -75,6 +75,7 @@
 #include "engines/nancy/action/puzzle/minigolfpuzzle.h"
 #include "engines/nancy/action/puzzle/mirrorlightpuzzle.h"
 #include "engines/nancy/action/puzzle/mosaicpuzzle.h"
+#include "engines/nancy/action/puzzle/whackitpuzzle.h"
 #include "engines/nancy/action/puzzle/mouselightpuzzle.h"
 #include "engines/nancy/action/puzzle/multibuildpuzzle.h"
 #include "engines/nancy/action/puzzle/necklacepuzzle.h"
@@ -728,6 +729,10 @@ ActionRecord *ActionManager::createActionRecord(uint16 type, Common::SeekableRea
 
 		return nullptr;
 	case 203:
+		if (g_nancy->getGameType() >= kGameTypeNancy16) {
+			return new WhackItPuzzle();
+		}
+
 		return new RippedLetterPuzzle();
 	case 204:
 		return new OverrideLockPuzzle();
